@@ -1,0 +1,12 @@
+name: frontier-investigation-e2e
+services:
+  workbench:
+    ports: !override
+      - "127.0.0.1:8767:8765"
+  forensic-worker:
+    volumes: !override
+      - analysis-data:/analysis
+      - type: bind
+        source: ./artifacts/e2e-evidence
+        target: /evidence
+        read_only: true

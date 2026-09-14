@@ -1,0 +1,1 @@
+{"id":"correlate-path-v1","triggers":["windows_event","process_event","management_log"],"join":"fields.path","normalization":"casefold","purpose":"동일 경로의 서로 다른 출처 관측을 연결하여 지지·반대 설명을 함께 검토한다.","max_children":3,"max_depth":5,"note":"연관 관측 자체는 실행·악성 여부를 확정하지 않는다."}

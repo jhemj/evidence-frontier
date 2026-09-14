@@ -1,0 +1,70 @@
+name: evidence-frontier
+services:
+  workbench:
+    build:
+      context: .
+      target: controller
+    image: evidence-frontier:0.1.0
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${WORKBENCH_PORT:-8765}:8765"
+    environment:
+      DATA_ROOT: /app/data
+      WORKER_URL: http://forensic-worker:8766
+      WORKER_TIMEOUT: ${WORKER_TIMEOUT:-14400}
+      WORKER_TOKEN: ${WORKER_TOKEN:?Run the setup script first}
+      WORKBENCH_TOKEN: ${WORKBENCH_TOKEN:-}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_TIMEOUT: ${MODEL_TIMEOUT:-300}
+      INVESTIGATION_MODEL_CALLS: ${INVESTIGATION_MODEL_CALLS:-12}
+      ANALYSIS_ROOT: /analysis
+      OPENRELIK_URL: ${OPENRELIK_URL:-}
+      OPENRELIK_TOKEN: ${OPENRELIK_TOKEN:-}
+    volumes:
+      - case-data:/app/data
+      - analysis-data:/analysis:ro
+      - ./config:/app/config:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [worker-plane,model-plane]
+    depends_on:
+      forensic-worker:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp:size=128M,mode=1777"]
+  forensic-worker:
+    build:
+      context: .
+      target: worker
+    image: evidence-frontier-worker:0.1.0
+    init: true
+    restart: unless-stopped
+    environment:
+      EVIDENCE_ROOT: /evidence
+      WORKER_TOKEN: ${WORKER_TOKEN:?Run the setup script first}
+      EWF_TIMEOUT: ${EWF_TIMEOUT:-7200}
+      ANALYSIS_ROOT: /analysis
+      HUNT_BUDGET_GIB: ${HUNT_BUDGET_GIB:-8}
+    volumes:
+      - analysis-data:/analysis
+      - type: bind
+        source: ${EVIDENCE_PATH:-./examples}
+        target: /evidence
+        read_only: true
+    networks: [worker-plane]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp:size=256M,mode=1777"]
+    mem_limit: ${WORKER_MEMORY:-4g}
+    cpus: 2
+networks:
+  worker-plane:
+    internal: true
+  model-plane: {}
+volumes:
+  case-data: {}
+  analysis-data: {}

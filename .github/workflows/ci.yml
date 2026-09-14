@@ -1,0 +1,38 @@
+name: Validate
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.15'
+      - run: uv sync --frozen --python 3.12
+      - run: uv run --frozen pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check dist/app.js
+  containers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/setup.sh --no-start
+      - run: docker compose build
+      - run: docker build --target test -t frontier-test .
+      - run: docker run --rm --network none frontier-test
+      - run: docker compose up -d --wait
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/smoke.py
+      - if: always()
+        run: docker compose logs --tail 100
+      - if: always()
+        run: docker compose down

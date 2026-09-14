@@ -1,0 +1,15 @@
+.venv/
+.uv-cache/
+.research/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+data/
+evidence/
+reports/
+*.egg-info/
+dist/.cache/
+config/openrelik-templates.json
+vendor/openrelik/runtime/
+artifacts/

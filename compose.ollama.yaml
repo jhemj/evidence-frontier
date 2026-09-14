@@ -1,0 +1,10 @@
+services:
+  ollama:
+    image: ollama/ollama:0.11.10
+    profiles: [local-ai]
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [model-plane]
+    # Optional GPU: add a Compose device reservation suitable for the host.
+volumes:
+  ollama-models: {}

@@ -1,0 +1,19 @@
+services:
+  openrelik-mediator:
+    image: ghcr.io/openrelik/openrelik-mediator:0.7.0@sha256:72943e50b62385f1cb77474dc2d173f3dc4b4cd1628e87c2948bd6e4c5202084
+  openrelik-postgres:
+    image: postgres:17@sha256:67f41722b7a8cbdb868a44a4995c846eddfdc2973bccb291ce937dce88ad5675
+  openrelik-redis:
+    image: redis:8@sha256:298e5b3bc566bade82f46ad5511777a4a07a294097ce16ada2f6a42be5239df5
+  openrelik-server:
+    image: ghcr.io/openrelik/openrelik-server:0.7.0@sha256:f6c97ef7e3d649de69b2f6ddfaece3cf3a6f99c0bfaad2692e7cb582fdd6e8ab
+  openrelik-ui:
+    image: ghcr.io/openrelik/openrelik-ui:0.7.0@sha256:e21aada75959f4e892d5a32582b2745a25fcbb41582c17f76cd4b3b4ecf5d8b8
+  openrelik-worker-extraction:
+    image: ghcr.io/openrelik/openrelik-worker-extraction:0.5.0@sha256:886800d3be91babde0e4adc8795db07da26718faa96e6f7f829076595696deca
+  openrelik-worker-grep:
+    image: ghcr.io/openrelik/openrelik-worker-grep:0.2.0@sha256:1b1ed48ca86d9cfa416e5ba9b9055ec07d18739470a7d1c690349addaa28b461
+  openrelik-worker-plaso:
+    image: ghcr.io/openrelik/openrelik-worker-plaso:0.5.0@sha256:b2d803d915de66eaf4cd28604fbb6655a440cab72d283fbd11252fc893e95125
+  openrelik-worker-strings:
+    image: ghcr.io/openrelik/openrelik-worker-strings:0.3.0@sha256:555b3ccb3b7125c15beafd21bdfad556bff4e34e308a01db96429f4ad38d80bc
