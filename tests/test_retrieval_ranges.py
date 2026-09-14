@@ -71,3 +71,26 @@ def test_late_match_excerpt_contains_match_and_long_boundary_is_not_lost(tmp_pat
     monkeypatch.setattr('workbench.retrieval.LINE_LIMIT',20003)
     result=request(tmp_path)
     assert any('needle' in o['fields']['excerpt'] for o in result['observations'])
+
+
+def test_unicode_casefold_match_has_correct_late_excerpt(tmp_path):
+    search_fixture(tmp_path,raw=('x'*20000+' Straße\n').encode(),query='STRASSE')
+    result=request(tmp_path,query='STRASSE')
+    fields=result['observations'][0]['fields']
+    assert 'strasse' in fields['excerpt'].casefold()
+    assert fields['byte_offset']>0
+    assert result['observations'][0]['source_location'].endswith(':offset:'+str(fields['byte_offset']))
+
+
+def test_long_line_overlap_does_not_repeat_a_match(tmp_path,monkeypatch):
+    search_fixture(tmp_path,raw=b'x'*80+b'needle'+b'x'*70+b'\n')
+    monkeypatch.setattr('workbench.retrieval.LINE_LIMIT',100)
+    result=request(tmp_path)
+    assert len(result['observations'])==1
+
+
+def test_utf8_boundary_inside_multibyte_character_is_searchable(tmp_path,monkeypatch):
+    search_fixture(tmp_path,raw=('가'*31+'침해흔적'+'나'*30+'\n').encode())
+    monkeypatch.setattr('workbench.retrieval.LINE_LIMIT',100)
+    result=request(tmp_path,query='침해흔적')
+    assert len(result['observations'])==1 and '침해흔적' in result['observations'][0]['fields']['excerpt']

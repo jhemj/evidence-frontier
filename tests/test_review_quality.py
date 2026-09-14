@@ -6,11 +6,36 @@ from workbench.dossiers import finish
 from workbench.review_validation import errors, check_errors
 
 
+def test_final_pack_is_bounded_even_when_all_sources_are_protected():
+    import json
+    from workbench.review_context import fit
+    observations=[{'id':str(i),'source_location':'image:/log','fields':{'excerpt':'x'*6000},
+        'context_request':{'tool':'read_file','path':'/log','byte_offset':i*6000}} for i in range(22)]
+    pack={'observations':observations,'allowed_observation_ids':[str(i) for i in range(22)]}
+    fit(pack)
+    assert len(json.dumps(pack,ensure_ascii=False))<=36000
+    assert len(pack['observations'])==22
+    assert all(o['fields']['excerpt_truncated'] and o['context_request'] for o in pack['observations'])
+
+
 def test_static_configuration_cannot_confirm_execution():
     f={'dossier_id':'d','judgment':'확인','observation_ids':['o'],'stages':[
         {'stage':'execution','judgment':'확인','statement':'ran','observation_ids':['o']}]}
     result=errors({'findings':[f]},['d'],['o'],{'d':['o']},{'o':{'type':'linux_configuration'}})
     assert any(i['code']=='static_facts_not_behavior' for i in result)
+    result=errors({'findings':[f]},['d'],['o'],{'d':['o']},{'o':{'type':'linux_tool_result'}})
+    assert any(i['code']=='static_facts_not_behavior' for i in result)
+
+
+def test_replacement_decoding_never_advances_byte_locator_from_text_length():
+    from workbench.investigation import compact_observation
+    o={'id':'o','type':'linux_literal_match','timestamp':None,'source_location':'image:/log',
+        'fields':{'path':'/log','artifact_path':'RUN-a/source','byte_offset':10,
+            'locator_basis':'gzip decompressed bytes','excerpt':'\ufffd'*7000}}
+    compact=compact_observation(o)
+    assert compact['context_request']['tool']=='read_source'
+    assert compact['context_request']['byte_offset']==10
+    assert compact['context_request']['byte_length']>8192
 
 
 def test_failed_empty_search_cannot_refute_and_unassessed_is_unknown():

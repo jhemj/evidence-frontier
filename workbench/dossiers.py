@@ -219,6 +219,8 @@ def finish(controller,cid,evidence,task):
         pack['shared_check_observation_ids']=shared
         pack['citation_contract']=CONTRACT_VERSION
         if batch.get('validation_feedback'):pack['validation_feedback']=batch['validation_feedback']
+        from .review_context import fit
+        fit(pack)
         context={'input_sha256':digest(pack),'included_ids':ids,'contract_version':CONTRACT_VERSION,
                  'generation':task.get('retry_generation',0),'round':batch['round'],'attempt':batch['attempts']+1}
         context['dossier_allowed_ids']=allowed_by_dossier

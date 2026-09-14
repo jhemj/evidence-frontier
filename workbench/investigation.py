@@ -76,8 +76,10 @@ def compact_observation(original):
             o['context_request']={'tool':'read_source','path':artifact,
                 'byte_offset':original['fields'].get('byte_offset',0),'byte_length':8192}
         if len(original_excerpt)>len(shown):
-            o['context_request']['byte_offset']+=len(shown.encode('utf-8'))
             o['fields']['excerpt_truncated']=True
+            o['context_request']['byte_length']=16384
+            # Replacement decoding and redaction make text length unsuitable as
+            # a byte locator. Re-read from a known original offset with overlap.
         o['context_request']['locator_limit']='Byte location is recorded where available; inspect the returned range before interpreting it.'
     return o
 

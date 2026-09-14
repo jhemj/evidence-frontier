@@ -21,7 +21,8 @@ def errors(output, dossier_ids, observation_ids, dossier_allowed=None, observati
             if stage['judgment']!='미확인' and not refs:issues.append({'code':'stage_missing_support','dossier_id':f['dossier_id']})
             if observations and stage['judgment']=='확인' and stage['stage'] in ('execution','connection','objective'):
                 sources=[observations[oid] for oid in refs if oid in observations]
-                static_types={'linux_configuration','linux_persistence','linux_path_match','linux_binary','filesystem_time','linux_account'}
+                static_types={'linux_configuration','linux_persistence','linux_path_match','linux_binary','filesystem_time','linux_account',
+                    'linux_tool_result','linux_literal_match','linux_detection','linux_inspection_result','linux_ssh_trust','linux_persistence_link'}
                 if sources and all(o['type'] in static_types for o in sources):
                     issues.append({'code':'static_facts_not_behavior','dossier_id':f['dossier_id'],'stage':stage['stage']})
         unknown=sorted(set(f['observation_ids'])-allowed)
