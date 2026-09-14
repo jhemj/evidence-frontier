@@ -137,6 +137,36 @@ def test_repair_extra_jobs_are_capped_at_four(tmp_path,monkeypatch):
     assert len(b['deferred_checks'])==2
 
 
+def test_repair_cannot_reserve_model_after_absolute_task_budget(tmp_path,monkeypatch):
+    from workbench.controller import Controller
+    from workbench.store import Store
+    c,cid,e,t,o,ds=failed_case(tmp_path);c.retry(t['id'],failed_dossiers_only=True)
+    with c.store.tx():
+        for i in range(582):c.store.add('review_input',cid,task_id=t['id'],generation=0,pack={})
+    c.store.db.close();c=Controller(Store(tmp_path/'case.db'),tmp_path);t=c.store.get(t['id'])
+    def unexpected(*args,**kwargs):raise AssertionError('model must not run')
+    monkeypatch.setattr('workbench.dossiers.Provider.generate',unexpected)
+    finish(c,cid,e,t)
+    assert len(c.store.list('review_input',cid))==582
+    assert next(b for b in c.store.list('dossier_batch',cid) if belongs(b,t))['status']=='failed'
+
+
+def test_repair_job_admission_respects_lifetime_reserve(tmp_path,monkeypatch):
+    c,cid,e,t,o,ds=failed_case(tmp_path);c.retry(t['id'],failed_dossiers_only=True);t=c.store.get(t['id'])
+    with c.store.tx():
+        for i in range(75):c.store.add('investigation_job',cid,task_id=t['id'],generation=0,status='done')
+    def model(self,question,pack,role):
+        out=response(pack)
+        out['next_checks']=[{'tool':'search','query':str(i),'reason':'check',
+            'hypothesis_id':out['findings'][0]['dossier_id'],'success_condition':'find source'} for i in range(3)]
+        return out,{'output':out}
+    monkeypatch.setattr('workbench.dossiers.Provider.generate',model)
+    finish(c,cid,e,t)
+    assert len(c.store.list('investigation_job',cid))==76
+    b=next(b for b in c.store.list('dossier_batch',cid) if belongs(b,t))
+    assert len(b['job_ids'])==1 and len(b['deferred_checks'])==2
+
+
 def test_recovery_allowance_survives_store_reopen_and_generation_change(tmp_path):
     from workbench.controller import Controller
     from workbench.store import Store

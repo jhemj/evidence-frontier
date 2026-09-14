@@ -32,7 +32,7 @@ def gap_checks(observations, maximum=8):
             path=gap['path']
             if path in seen or gap['status']=='format_unparsed':continue
             seen.add(path)
-            calls.append({'tool':'read_file','path':path,'byte_offset':gap.get('bytes_scanned') or 0,
+            calls.append({'tool':'read_file','path':path,'partition_offset':gap.get('partition_offset'),'byte_offset':gap.get('bytes_scanned') or 0,
                 'byte_length':8192,'reason':'중요 자료 미처리 구간 보완. 전체 파일 처리나 부재 확인을 뜻하지 않음.'})
             if len(calls)>=maximum:return calls
     return calls

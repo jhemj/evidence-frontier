@@ -36,6 +36,8 @@ def test_replacement_decoding_never_advances_byte_locator_from_text_length():
     assert compact['context_request']['tool']=='read_source'
     assert compact['context_request']['byte_offset']==10
     assert compact['context_request']['byte_length']>8192
+    from workbench.models import InvestigationTool
+    assert InvestigationTool(**compact['context_request']).tool=='read_source'
 
 
 def test_failed_empty_search_cannot_refute_and_unassessed_is_unknown():
@@ -44,6 +46,19 @@ def test_failed_empty_search_cannot_refute_and_unassessed_is_unknown():
     assert check_errors(out,checks,{})
     out={};assert not check_errors(out,checks,{})
     assert out['check_assessments'][0]['outcome']=='inconclusive'
+
+
+def test_shared_physical_check_keeps_opposing_hypothesis_contracts():
+    from workbench.review_contracts import contract,attach
+    first={'hypothesis_id':'d1','success_condition':'marker present','refutation_condition':'marker absent'}
+    second={'hypothesis_id':'d2','success_condition':'marker absent','refutation_condition':'marker present'}
+    job={'request':first,'contracts':[contract(first)]}
+    bound=attach(job,second)
+    check={'id':'job','contracts':bound,'status':'covered','observation_ids':['o']}
+    assessments=[{'check_id':'job','dossier_id':c['dossier_id'],'contract_id':c['contract_id'],
+        'outcome':'supports' if c['dossier_id']=='d1' else 'refutes','reason':'marker exists','observation_ids':['o']} for c in bound]
+    assert not check_errors({'check_assessments':assessments},[check],{'d1':['o'],'d2':['o']})
+    assert check_errors({'check_assessments':assessments},[check],{'d1':['o'],'d2':[]})
 
 
 def test_blind_review_then_comparison_preserves_distinct_inputs(tmp_path,monkeypatch):

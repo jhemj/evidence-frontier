@@ -80,7 +80,9 @@ def compact_observation(original):
             o['context_request']['byte_length']=16384
             # Replacement decoding and redaction make text length unsuitable as
             # a byte locator. Re-read from a known original offset with overlap.
-        o['context_request']['locator_limit']='Byte location is recorded where available; inspect the returned range before interpreting it.'
+        for selector in ('partition_offset','inode'):
+            if original['fields'].get(selector) is not None:o['context_request'][selector]=original['fields'][selector]
+        o['context_limit']='Byte location is recorded where available; inspect the returned range before interpreting it.'
     return o
 
 

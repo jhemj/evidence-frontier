@@ -66,6 +66,9 @@ def read_source(run, image, manifest, request):
     relative=request.path.removeprefix(run.name+'/')
     source=next((s for s in manifest['sources'] if s.get('relative_path')==relative),None)
     if source is None:raise ValueError('보존 원장에 등록된 원문만 조회할 수 있습니다.')
+    for selector in ('partition_offset','inode'):
+        expected=getattr(request,selector)
+        if expected is not None and source.get(selector)!=expected:raise ValueError('보존 원문 객체 선택자가 일치하지 않습니다.')
     path=(run/relative).resolve()
     if not path.is_relative_to(run.resolve()):raise ValueError('보존 원문 경로 범위 오류')
     with path.open('rb') as stream:
@@ -153,6 +156,8 @@ def search(run, image, manifest, request):
                         item=json.loads(text)
                         if 'fields' not in item:item={'type':'linux_path_match','timestamp':None,'source_location':f"{image.name}:byte:{item['partition_offset']}:{item['path']}:inode:{item['inode']}",'fields':item}
                     f=item['fields'];p=f.get('path','')
+                    if request.partition_offset is not None and f.get('partition_offset')!=request.partition_offset:item=None
+                    if request.inode is not None and f.get('inode')!=request.inode:item=None
                     if request.path and not (p==request.path or p.startswith(request.path.rstrip('/')+'/')):item=None
                     if item and request.account and not re.search(r'(?<![\w.-])'+re.escape(request.account)+r'(?![\w.-])',text):item=None
                     if item and (lower or upper):

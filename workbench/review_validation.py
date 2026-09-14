@@ -39,22 +39,27 @@ def errors(output, dossier_ids, observation_ids, dossier_allowed=None, observati
 
 
 def check_errors(output, checks, allowed_by_dossier):
-    issues=[];by_id={c['id']:c for c in checks};seen=set()
+    issues=[];by_key={};seen=set()
+    for check in checks:
+        for c in check.get('contracts') or [{'dossier_id':'','contract_id':''}]:
+            by_key[(check['id'],c['dossier_id'],c['contract_id'])]=(check,c)
     for assessment in output.get('check_assessments',[]):
-        cid=assessment['check_id'];check=by_id.get(cid)
-        if not check or cid in seen:
-            issues.append({'code':'invalid_check_assessment','id':cid});continue
-        seen.add(cid)
+        key=(assessment['check_id'],assessment.get('dossier_id',''),assessment.get('contract_id',''))
+        pair=by_key.get(key)
+        if pair is None or key in seen:
+            issues.append({'code':'invalid_check_assessment','id':key});continue
+        seen.add(key);check,contract=pair
         refs=set(assessment['observation_ids'])
-        if refs-set(check.get('observation_ids',[])):
-            issues.append({'code':'check_citation_scope','id':cid})
+        allowed=set(check.get('observation_ids',[]))
+        if key[1]:allowed &= set(allowed_by_dossier.get(key[1],[]))
+        if refs-allowed:issues.append({'code':'check_citation_scope','id':key})
         if assessment['outcome']!='inconclusive' and not refs:
-            issues.append({'code':'check_missing_support','id':cid})
+            issues.append({'code':'check_missing_support','id':key})
+        if key[1] and assessment['outcome']!='inconclusive' and not contract.get('refutation_condition'):
+            issues.append({'code':'missing_discriminating_condition','id':key})
         if assessment['outcome']=='refutes' and check.get('status') not in ('covered','covered_zero') and not refs:
-            issues.append({'code':'partial_search_not_refutation','id':cid})
-    # Missing assessment is explicitly unknown, never silently a successful
-    # falsification. Preserve this in the accepted, fully cited result.
-    for cid in by_id.keys()-seen:
-        output.setdefault('check_assessments',[]).append({'check_id':cid,'outcome':'inconclusive',
-            'reason':'실제 검사 결과에 대한 판별 평가가 제공되지 않았습니다.','observation_ids':[]})
+            issues.append({'code':'partial_search_not_refutation','id':key})
+    for key in by_key.keys()-seen:
+        output.setdefault('check_assessments',[]).append({'check_id':key[0],'dossier_id':key[1],'contract_id':key[2],
+            'outcome':'inconclusive','reason':'이 가설의 판별조건에 대한 결과 평가가 제공되지 않았습니다.','observation_ids':[]})
     return issues

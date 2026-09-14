@@ -62,13 +62,13 @@ class Provider:
                 'Only cite IDs present in this evidence pack. Separate observations, interpretations, alternatives, uncertainties. '
                 'Never infer absence from missing or failed collection. Write Korean. Output only JSON matching the schema. '
                 'The search tool uses a case-insensitive literal substring. Spaces are literal; there is no AND, OR or regex syntax. '
-                'Use cursor to continue search, path to limit exact path/subtree, account as literal token, time_from/time_to with explicit timezone (undated lines are excluded). Use read_file byte_offset/byte_length for original file byte ranges. Decompressed offsets cannot be passed as original compressed-file offsets. read_source uses artifact_path from evidence and byte_offset within retained bytes, preserving its recorded coordinate basis. '
+                'Use cursor to continue search, path to limit exact path/subtree, account as literal token, time_from/time_to with explicit timezone (undated lines are excluded). Use read_file byte_offset/byte_length for original file byte ranges. Preserve partition_offset and inode from the source; ambiguous paths across multiple filesystems are rejected. Decompressed offsets cannot be passed as original compressed-file offsets. read_source uses artifact_path from evidence and byte_offset within retained bytes, preserving its recorded coordinate basis. '
                 'Search one discriminating token or an exact phrase per call, then inspect returned source context. '
                 'Omitted matches and truncated source searches are unexamined, not negative evidence. ')
         if role=='judgment':
             system+=('In blind_source_review mode ignore prior interpretations and inspect source facts independently; same model does not imply statistically independent judgment. '
                 'Provide one to three relevant stages for each confirmed or probable finding. Use stages for relevant configuration, invocation, execution, connection, objective and intent statements. Each stage has its OWN confidence and source IDs. Never promote one stage automatically from another. '
-                'For every executed check return check_assessments with its id, supports/refutes/inconclusive, reason and IDs from that check. Execution status is not a verdict. '
+                'For each executed check contract return check_assessments with check_id, dossier_id and contract_id from its contracts list, supports/refutes/inconclusive, reason and IDs from that check. Execution status is not a verdict. '
                 'For next_checks provide success_condition, refutation_condition and inconclusive_condition BEFORE the check runs. If no distinguishing test exists, state that in remaining_checks. '
                 'Same source_origin means dependent evidence; different origins do not automatically prove independence. '
                 'Make the final investigation judgments automatically; do not ask for analyst approval. '

@@ -38,27 +38,31 @@ def execute_tool(evidence_root, analysis_root, body):
             path = request.path
             if not path.startswith('/') or '\x00' in path or '..' in path.split('/') or len(path) > 1500:
                 raise ValueError('이미지 내부 절대경로만 허용합니다.')
-            target = Target.open(str(image), apply=False); target.disks.apply(); found = None
+            target = Target.open(str(image), apply=False); target.disks.apply(); candidates = []
             for volume in target.volumes:
+                if request.partition_offset is not None and volume.offset != request.partition_offset:continue
                 volume.seek(0); header = volume.read(4096); volume.seek(0)
                 if header[:4] == b'XFSB': fs = XfsFilesystem(volume)
                 elif header[1080:1082] == b'\x53\xef': fs = ExtFilesystem(volume)
                 else: continue
-                try: fs.get('/etc/passwd')
-                except Exception: continue
+                if request.partition_offset is None:
+                    try: fs.get('/etc/passwd')
+                    except Exception: continue
                 try:
                     node = fs.get(path); s = node.lstat()
                     if not stat.S_ISREG(s.st_mode): raise ValueError('일반 파일만 직접 읽을 수 있습니다. 링크는 실제 이미지 내부 경로를 선택하세요.')
-                    with node.open() as stream:
-                        if request.tool == 'read_file':
-                            if request.byte_offset > s.st_size:raise ValueError('파일 크기를 벗어난 읽기 위치')
-                            stream.seek(request.byte_offset)
-                            data = stream.read(request.byte_length)
-                        else:data = stream.read(16 * 1024 * 1024)
-                    found = volume, s, data; break
+                    if request.inode is not None and s.st_ino != request.inode:raise ValueError('선택한 원문 inode가 일치하지 않습니다.')
+                    candidates.append((volume, s, node))
                 except FileNotFoundError: continue
-            if found is None: raise ValueError('접근한 Linux 루트에서 현재 경로를 찾지 못했습니다. 과거 부재를 뜻하지 않습니다.')
-            volume, s, data = found
+            if not candidates:raise ValueError('선택한 Linux 파일시스템에서 경로를 찾지 못했습니다. 과거 부재를 뜻하지 않습니다.')
+            if len(candidates)>1:raise ValueError('여러 파티션에 같은 경로가 있습니다. partition_offset으로 원문을 지정하세요.')
+            volume, s, node = candidates[0]
+            with node.open() as stream:
+                if request.tool == 'read_file':
+                    if request.byte_offset > s.st_size:raise ValueError('파일 크기를 벗어난 읽기 위치')
+                    stream.seek(request.byte_offset)
+                    data=stream.read(request.byte_length)
+                else:data=stream.read(16 * 1024 * 1024)
             derived = run / 'followup'; derived.mkdir(exist_ok=True)
             digest = hashlib.sha256(data).hexdigest(); destination = derived / (digest + '.bin')
             if not destination.exists(): destination.write_bytes(data)

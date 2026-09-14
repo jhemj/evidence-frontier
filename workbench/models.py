@@ -51,6 +51,8 @@ class ClaimStage(Strict):
 
 class CheckAssessment(Strict):
     check_id: str = Field(max_length=100)
+    dossier_id: str = Field(default='', max_length=100)
+    contract_id: str = Field(default='', max_length=100)
     outcome: Literal['supports','refutes','inconclusive']
     reason: str = Field(min_length=1, max_length=500)
     observation_ids: list[str] = Field(default_factory=list, max_length=8)
@@ -73,6 +75,8 @@ class RetrievalScope(Strict):
     limit: int = Field(default=30, ge=1, le=60)
     byte_offset: int = Field(default=0, ge=0)
     byte_length: int = Field(default=8192, ge=256, le=65536)
+    partition_offset: int | None = Field(default=None, ge=0)
+    inode: int | None = Field(default=None, ge=0)
     account: str = Field(default='', max_length=200)
     time_from: str = Field(default='', max_length=80)
     time_to: str = Field(default='', max_length=80)

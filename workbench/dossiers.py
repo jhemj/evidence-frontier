@@ -1,4 +1,5 @@
 from .retrieval import tool_scope, fingerprint_scope
+from .review_contracts import REVIEW_BUDGET, contract, contracts, attach, model_exhausted, tools_exhausted
 """Persistent per-lead and baseline review; final prose cannot discard a lead."""
 import hashlib
 import json
@@ -117,6 +118,7 @@ def seed(controller,cid,evidence,task):
 
 def finish(controller,cid,evidence,task):
     store=controller.store
+    if not store.get(task['id']).get('review_budget'):store.update(task['id'],review_budget=REVIEW_BUDGET)
     existing=[j for j in store.list('judgment',cid) if belongs(j,task)]
     if existing:return existing[-1]['result']
     seed(controller,cid,evidence,task)
@@ -166,7 +168,7 @@ def finish(controller,cid,evidence,task):
         store.update(batch['id'],status='pending',round=batch['round']+1,attempts=0,validation_feedback=None)
         return None
     lifetime_attempts=sum(r.get('task_id')==task['id'] for r in store.list('review_input',cid))
-    if batch['attempts']>=2 or (not is_repair(task) and lifetime_attempts>=576):
+    if batch['attempts']>=2 or model_exhausted(lifetime_attempts,is_repair(task)):
         with store.tx():
             for did in batch['dossier_ids']:store.update(did,status='model_failed',error='bounded model attempts exhausted')
             store.update(batch['id'],status='failed')
@@ -179,7 +181,9 @@ def finish(controller,cid,evidence,task):
         checks=[]
         for jid in batch['job_ids']:
             job=store.get(jid);ids+=job.get('observation_ids',[])[:12]
-            checks.append({'id':job['id'],'request':job['request'],'status':job.get('result_status'),'scope':job.get('result_scope',{}),'observation_ids':job.get('observation_ids',[])})
+            checks.append({'id':job['id'],'request':tool_scope(job['request']),
+                'contracts':[c for c in contracts(job) if c['dossier_id'] in batch['dossier_ids']],
+                'status':job.get('result_status'),'scope':job.get('result_scope',{}),'observation_ids':job.get('observation_ids',[])})
         ids=list(dict.fromkeys(oid for oid in ids if oid in all_obs))
         compact=[]
         for oid in ids:
@@ -228,6 +232,7 @@ def finish(controller,cid,evidence,task):
         with store.tx():
             reservation=store.get(batch['id'])
             if reservation['status']!='pending' or reservation['round']!=batch['round'] or reservation['attempts']!=batch['attempts']:return None
+            if model_exhausted(sum(r.get('task_id')==task['id'] for r in store.list('review_input',cid)),is_repair(task)):return None
             input_record=store.add('review_input',cid,task_id=task['id'],batch_id=batch['id'],pack=pack,**context)
             context['input_record_id']=input_record['id']
             store.update(batch['id'],attempts=batch['attempts']+1,active_attempt_id=input_record['id'])
@@ -276,13 +281,14 @@ def finish(controller,cid,evidence,task):
                 old=next((j for j in jobs if j['fingerprint']==fingerprint),None)
                 if old:
                     store.update(old['id'],dossier_ids=list(dict.fromkeys(old.get('dossier_ids',[old['request'].get('hypothesis_id')])+[call['hypothesis_id']])))
+                    store.update(old['id'],contracts=attach(store.get(old['id']),call))
                     if old['id'] not in batch['job_ids']:admitted.append(old['id'])
                     else:deferred.append({'request':call,'reason':'identical input already checked; no new scope'})
                     continue
-                if (len(jobs)>=4 if is_repair(task) else len(lifetime_jobs)>=72) or not source_run:
+                if tools_exhausted(len(lifetime_jobs),len(jobs),is_repair(task)) or not source_run:
                     deferred.append({'request':call,'reason':'job budget reached' if source_run else 'source run unavailable'});continue
                 job=store.add('investigation_job',cid,task_id=task['id'],evidence_id=evidence['id'],fingerprint=fingerprint,
-                    generation=task.get('retry_generation',0),request=call,dossier_ids=[call['hypothesis_id']],purpose='dossier_falsification',source_run=source_run,status='admitted')
+                    generation=task.get('retry_generation',0),request=call,dossier_ids=[call['hypothesis_id']],contracts=[contract(call)],purpose='dossier_falsification',source_run=source_run,status='admitted')
                 jobs.append(job);lifetime_jobs.append(job);admitted.append(job['id'])
             if admitted:
                 store.update(batch['id'],status='await_checks',job_ids=list(dict.fromkeys(batch['job_ids']+admitted)),deferred_checks=deferred)
