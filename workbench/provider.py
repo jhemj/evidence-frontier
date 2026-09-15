@@ -30,6 +30,11 @@ class Provider:
     def __init__(self,config):
         self.config=config
         self.base=validate_url(config['base_url'],config.get('trusted_lan',False))
+        relay=os.getenv('MODEL_RELAY_URL')
+        if relay:
+            if self.base!=os.getenv('MODEL_UPSTREAM_URL','http://host.docker.internal:11434').rstrip('/'):
+                raise ValueError('모델 주소가 배포 시 고정한 로컬 모델 주소와 다릅니다.')
+            self.base=relay.rstrip('/')
         timeout=max(30,min(600,int(os.getenv('MODEL_TIMEOUT','300'))))
         self.client=httpx.Client(timeout=httpx.Timeout(timeout,connect=10),follow_redirects=False,trust_env=False,headers={'Authorization':'Bearer '+os.environ['MODEL_API_KEY']} if os.getenv('MODEL_API_KEY') else {})
 

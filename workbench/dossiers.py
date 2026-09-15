@@ -120,6 +120,8 @@ def seed(controller,cid,evidence,task):
 
 
 def finish(controller,cid,evidence,task):
+    from .runtime_contract import guard
+    guard(controller,cid,task)
     store=controller.store
     if not store.get(task['id']).get('review_budget'):store.update(task['id'],review_budget=REVIEW_BUDGET)
     existing=[j for j in store.list('judgment',cid) if belongs(j,task)]
@@ -129,9 +131,9 @@ def finish(controller,cid,evidence,task):
     batch=next((b for b in batches if b['status'] not in ('done','failed')),None)
     if batch is None:
         dossiers=[d for d in store.list('dossier',cid) if belongs(d,task)]
-        findings=[d['finding'] for d in dossiers if d.get('finding')]
-        if not findings:return {'status':'failed','complete':False,'observations':[],'error':'AI 단서 검토 실패. 탐지 사실과 원문은 보존됨.'}
-        counts={level:sum(f['judgment']==level for f in findings) for level in ('확인','유력','미확인')}
+        findings=[d['finding'] for d in dossiers if d.get('finding') and d['status']=='reviewed']
+        if not findings and any(d['status']=='model_failed' for d in dossiers):return {'status':'failed','complete':False,'observations':[],'error':'AI 단서 검토 실패. 탐지 사실과 원문은 보존됨.'}
+        counts={level:sum(f['judgment']==level and f.get('timeline_role')!='반증됨' for f in findings) for level in ('확인','유력','미확인')}
         pending=sum(d['status']!='reviewed' for d in dossiers)
         critical_pending=sum(d['status']!='reviewed' and d.get('review_family') in ('access','persistence','execution') for d in dossiers)
         limited=any(b.get('deferred_checks') or b['round']>=MAX_ROUNDS-1 for b in batches)
@@ -274,6 +276,7 @@ def finish(controller,cid,evidence,task):
             return None
         with store.tx():
             current_task=store.get(task['id']);current_evidence=store.get(evidence['id']);current_batch=store.get(batch['id'])
+            guard(controller,cid,task)
             if (current_task.get('retry_generation',0)!=task.get('retry_generation',0) or current_task.get('superseded')
                 or current_task.get('status') not in (None,'running','queued')
                 or not current_evidence.get('connected',True) or current_evidence['signature']!=evidence['signature']

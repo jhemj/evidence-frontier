@@ -99,3 +99,50 @@ def test_previous_generation_is_history_before_new_judgment_exists(tmp_path):
     c.store.update(t['id'],retry_generation=1)
     assert current(c,cid)==[]
     assert c.store.get(previous['id'])==previous
+
+
+def test_empty_baselines_publish_coverage_without_model_failure(tmp_path,monkeypatch):
+    from workbench.controller import Controller
+    from workbench.store import Store
+    from workbench.dossiers import finish
+    c=Controller(Store(tmp_path/'empty.db'),tmp_path);cid=c.create('Empty','','standard')['id']
+    e=c.store.add('evidence',cid,connected=True,signature='fixture')
+    t=c.store.add('task',cid,evidence_id=e['id'])
+    def forbidden(*a,**k):raise AssertionError('no source to review')
+    monkeypatch.setattr('workbench.dossiers.Provider.generate',forbidden)
+    result=finish(c,cid,e,t)
+    assert result['status']=='partial' and result['unavailable_baselines']==3
+    assert result['judgment_counts']=={'확인':0,'유력':0,'미확인':0}
+    assert finish(c,cid,e,t)==result and len(c.store.list('dossier',cid))==3
+
+
+def test_direct_review_rejects_model_change_before_adoption(tmp_path,monkeypatch):
+    import pytest
+    from test_dossiers import setup
+    from test_review_repair import response
+    from workbench.dossiers import finish
+    c,cid,e,t,o=setup(tmp_path)
+    def change(self,question,pack,role):
+        config=c.store.list('config')[-1]
+        c.store.update(config['id'],provider={**config['provider'],'model':'changed'})
+        output=response(pack);return output,{'output':output}
+    monkeypatch.setattr('workbench.dossiers.Provider.generate',change)
+    with pytest.raises(ValueError,match='실행 조합'):finish(c,cid,e,t)
+    assert not c.store.list('judgment',cid)
+    assert not any(d.get('finding') for d in c.store.list('dossier',cid))
+
+
+def test_current_reviewed_dossier_is_visible_before_queue_finishes(tmp_path):
+    from test_dossiers import setup
+    from workbench.judgment import current
+    c,cid,e,t,o=setup(tmp_path)
+    f={'title':'inert fact','judgment':'유력','reason':'source','observation_ids':[o['id']]}
+    d=c.store.add('dossier',cid,task_id=t['id'],evidence_id=e['id'],generation=0,status='reviewed',finding=f)
+    c.store.add('dossier',cid,task_id=t['id'],evidence_id=e['id'],generation=0,status='model_failed',finding=f)
+    first=current(c,cid)
+    assert first[0]['findings']==[f] and not c.store.list('judgment',cid)
+    c.store.update(d['id'],finding={**f,'timeline_role':'반증됨'})
+    second=current(c,cid)
+    assert second[0]['id']!=first[0]['id'] and second[0]['findings'][0]['timeline_role']=='반증됨'
+    c.store.update(t['id'],retry_generation=1)
+    assert current(c,cid)==[]

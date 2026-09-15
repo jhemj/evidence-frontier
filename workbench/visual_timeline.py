@@ -1,6 +1,7 @@
 """An explainable projection of immutable facts and successive AI assessments."""
 from collections import Counter
 from datetime import datetime, timezone
+from .judgment import current_dossiers, reviewed_finding
 
 
 def instant(value):
@@ -23,9 +24,7 @@ def project(data):
         if o['type']=='linux_detection' and not o.get('timestamp'):
             return record_times.get(origin(o),{}).get('timestamp')
         return o.get('timestamp')
-    tasks={t['id']:t for t in data['task'] if not t.get('superseded')}
-    dossiers={d['id']:d for d in data.get('dossier',[]) if d['evidence_id'] in active and d['task_id'] in tasks
-        and d.get('generation',0)==tasks[d['task_id']].get('retry_generation',0)}
+    dossiers={d['id']:d for d in current_dossiers(data.get('dossier',[]),data['task'],active)}
     assessments={};history=[]
     for r in data.get('receipt',[]):
         if r.get('receipt_type')!='dossier_model':continue
@@ -40,7 +39,7 @@ def project(data):
     findings=[]
     for did,d in dossiers.items():
         f=d.get('finding') or assessments.get(did)
-        if f:findings.append((did,{**f,'review_status':d['status']},d['status']!='reviewed'))
+        if f:findings.append((did,{**f,'review_status':d['status']},not bool(reviewed_finding(d,obs))))
         elif not d['baseline']:
             reason={'model_failed':'AI 검토에 실패했습니다. 원문 단서와 실패 이력을 보존합니다.',
                     'deferred':'검토 한도로 아직 판단하지 못한 단서입니다. 원문은 보존합니다.'}.get(d['status'],'원문에서 발견한 단서입니다. 정황과 경쟁 설명을 검토하고 있습니다.')

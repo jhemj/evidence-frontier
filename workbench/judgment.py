@@ -1,6 +1,8 @@
 """Automatic three-level judgments, separate from immutable source observations."""
 import httpx
 import re
+import hashlib
+import json
 from .investigation import evidence_pack
 from .provider import Provider
 
@@ -17,9 +19,20 @@ def bound_absence(finding):
     return finding
 
 
+def current_dossiers(rows, tasks, active):
+    tasks={t['id']:t for t in tasks if not t.get('superseded')}
+    return [d for d in rows if d['evidence_id'] in active and d['task_id'] in tasks
+        and d.get('generation',0)==tasks[d['task_id']].get('retry_generation',0)]
+
+
+def reviewed_finding(dossier, observations):
+    finding=dossier.get('finding')
+    return (dossier.get('status')=='reviewed' and finding and finding.get('observation_ids')
+        and set(finding['observation_ids']).issubset(observations))
+
+
 def current(controller, case_id, source_observations=None):
     records = controller.store.list('judgment', case_id)
-    if not records: return []
     active = controller.active_ids(case_id)
     observations = {o['id'] for o in (source_observations if source_observations is not None else controller.active_observations(case_id)) if o['evidence_id'] in active}
     latest = {}
@@ -30,6 +43,20 @@ def current(controller, case_id, source_observations=None):
         if task is None or record.get('generation',0)!=task.get('retry_generation',0):continue
         if any(not set(f['observation_ids']).issubset(observations) for f in record['findings']): continue
         latest[record['evidence_id']] = record
+    # Publish each accepted dossier immediately; reports and summary share this projection.
+    rows=current_dossiers(controller.store.list('dossier',case_id),tasks.values(),active)
+    for eid in {d['evidence_id'] for d in rows}:
+        selected=[d for d in rows if d['evidence_id']==eid and reviewed_finding(d,observations)]
+        if not selected:
+            continue
+        findings=[d['finding'] for d in selected]
+        signature=hashlib.sha256(json.dumps(findings,sort_keys=True,ensure_ascii=False).encode()).hexdigest()[:20]
+        stored=latest.get(eid)
+        if stored and stored['findings']==findings:continue
+        latest[eid]={'id':'CURRENT-'+signature,'evidence_id':eid,'findings':findings,
+            'task_id':selected[0]['task_id'],'generation':selected[0].get('generation',0),
+            'selection_is_partial':True,'summary':f'현재 세대에서 근거 검토를 마친 판단 {len(findings)}개입니다. 조사가 진행되면서 갱신됩니다.',
+            'dossier_ids':[d['id'] for d in selected]}
     return list(latest.values())
 
 

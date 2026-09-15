@@ -64,6 +64,8 @@ class Investigation:
     def run(self, state): return self.s.get(state['run_id'])
 
     def model(self, question, pack, run, purpose):
+        from .runtime_contract import guard
+        guard(self.c,self.case_id,self.task)
         configs = self.s.list('config'); config = configs[-1]['provider'] if configs else {}
         if not config.get('model'): raise ValueError('로컬 모델을 연결한 뒤 계속하세요.')
         if not self.c.model_lock.acquire(blocking=False): raise ValueError('다른 AI 요청이 끝난 뒤 계속하세요.')
@@ -78,6 +80,7 @@ class Investigation:
                     self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='model_error',reservation_id=reservation['id'],error=str(ex))
                     self.s.update(reservation['id'],status='failed',error=str(ex))
                 return None
+            guard(self.c,self.case_id,self.task)
             with self.s.tx():
                 self.s.add('receipt', self.case_id, task_id=self.task['id'], evidence_id=self.e['id'], receipt_type='investigator_model', reservation_id=reservation['id'], **receipt)
                 self.s.update(reservation['id'], status='received', usage=receipt.get('usage'))
@@ -234,6 +237,8 @@ class Investigation:
             pack['executed_checks']=[{'request':j['request'],'status':j.get('result_status'),'observation_ids':j.get('observation_ids',[])} for j in jobs if j['purpose']=='challenge']
             if not self.c.model_lock.acquire(blocking=False):raise ValueError('로컬 AI 응답 대기')
             try:
+                from .runtime_contract import guard
+                guard(self.c,self.case_id,self.task)
                 self.s.update(run['id'],review_calls=run.get('review_calls',0)+1)
                 self.s.update(self.case_id,investigation_stage='원문 대조 후 경쟁 설명 검토')
                 try:review,receipt=Provider(config).generate('실제로 실행한 검사와 원문을 바탕으로 다음 주장의 대안 설명·상충 근거·미완료 검사를 검토하세요. 동일 출처 재읽기를 독립 검증으로 부르지 마세요: '+claim['text'],pack,role='falsifier')
@@ -242,6 +247,7 @@ class Investigation:
                     return {}
                 if not set(review['contradicting_observation_ids']).issubset({o['id'] for o in pack['observations']}):raise ValueError('반증 검토가 존재하지 않는 근거를 참조함')
                 with self.s.tx():
+                    guard(self.c,self.case_id,self.task)
                     self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='automatic_falsifier',claim_id=claim['id'],**receipt)
                     self.s.update(claim['id'],falsification=review,challenge_status='reviewed_with_limits',
                         actual_check_ids=[j['id'] for j in jobs if j['purpose']=='challenge'],review_type='실제 도구 대조 후 로컬 AI 경쟁 설명 검토 · 독립 해석 검증 아님')
@@ -293,6 +299,8 @@ class Investigation:
         return builder.compile(checkpointer=saver, interrupt_after=NODES)
 
 def tick(controller, case_id, evidence, task):
+    from .runtime_contract import guard
+    guard(controller,case_id,task)
     root = Path(os.getenv('DATA_ROOT', str(Path(__file__).resolve().parent.parent / 'data')))
     root.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(root/'investigation-checkpoints.sqlite3', check_same_thread=False) as connection:

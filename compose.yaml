@@ -17,6 +17,8 @@ services:
       WORKBENCH_TOKEN: ${WORKBENCH_TOKEN:-}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       MODEL_TIMEOUT: ${MODEL_TIMEOUT:-300}
+      MODEL_RELAY_URL: http://model-relay:8768
+      MODEL_UPSTREAM_URL: ${MODEL_UPSTREAM_URL:-http://host.docker.internal:11434}
       INVESTIGATION_MODEL_CALLS: ${INVESTIGATION_MODEL_CALLS:-12}
       FRONTIER_RELEASE: ${FRONTIER_RELEASE:-unrecorded}
       FRONTIER_MODEL_DIGEST: ${FRONTIER_MODEL_DIGEST:-unverified}
@@ -32,12 +34,35 @@ services:
       - "host.docker.internal:host-gateway"
     networks: [worker-plane,model-plane]
     depends_on:
+      model-relay:
+        condition: service_healthy
       forensic-worker:
         condition: service_healthy
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     read_only: true
     tmpfs: ["/tmp:size=128M,mode=1777"]
+  model-relay:
+    image: evidence-frontier:0.1.0
+    command: ["uvicorn","workbench.model_relay:app","--host","0.0.0.0","--port","8768"]
+    init: true
+    restart: unless-stopped
+    environment:
+      MODEL_UPSTREAM_URL: ${MODEL_UPSTREAM_URL:-http://host.docker.internal:11434}
+      MODEL_UPSTREAM_TRUSTED_LAN: ${MODEL_UPSTREAM_TRUSTED_LAN:-0}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [model-plane,model-egress]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp:size=32M,mode=1777"]
+    mem_limit: 256m
+    cpus: 1
+    healthcheck:
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8768/health')"]
+      interval: 15s
+      timeout: 5s
+      start_period: 5s
   forensic-worker:
     build:
       context: .
@@ -67,7 +92,9 @@ services:
 networks:
   worker-plane:
     internal: true
-  model-plane: {}
+  model-plane:
+    internal: true
+  model-egress: {}
 volumes:
   case-data: {}
   analysis-data: {}

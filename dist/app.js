@@ -166,7 +166,7 @@ function renderSnapshot() {
   }
   $("hypotheses").innerHTML = investigation.map((h) => `<article class="claim"><h3>${h.number}. ${esc(h.text)}</h3><span class="status">${esc(h.judgment)}${h.ai_candidate ? " · AI 검토 후보" : ""}</span><p>${esc(h.reasoning || "원문 조사와 검증을 기다리고 있습니다.")}</p><p>경쟁 설명: ${esc((h.competing_explanations || []).join(" / "))}</p><p>남은 확인: ${esc((h.remaining_checks || h.unavailable_materials || []).join(" / "))}</p><p>${(h.observation_ids || []).slice(0,6).map((id) => `<button data-ref="${esc(id)}">원문 근거 ${esc(id.slice(-6))}</button>`).join(" ")}</p></article>`).join("");
   const judgments = s.judgments || [];
-  const findings = judgments.flatMap((j) => j.findings);
+  const findings = judgments.flatMap((j) => j.findings).filter((f) => f.timeline_role !== '반증됨');
   $("judgment-results").hidden = !judgments.length;
   $("messages").hidden = !!judgments.length && !s.message.some((m) => !m.automatic && m.created_at > judgments.at(-1).created_at);
   $("suggestions").hidden = !!judgments.length;

@@ -5,7 +5,7 @@ from collections import defaultdict
 def spread(items, limit):
     buckets=defaultdict(list)
     for item in items:
-        f=item['fields'];buckets[(str(f.get('partition_offset')),f.get('path',''),item['type'])].append(item)
+        f=item['fields'];buckets[(str(f.get('partition_offset')),f.get('path',''),item['type'],bool(item.get('timestamp')))].append(item)
     ordered=[]
     for key in sorted(buckets):
         rows=sorted(buckets[key],key=lambda o:(o.get('timestamp') or '',o['fields'].get('image_file_byte_offset',o['fields'].get('byte_offset',0)) or 0,o['id']))

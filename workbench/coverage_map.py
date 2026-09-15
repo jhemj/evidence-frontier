@@ -47,7 +47,8 @@ def summarize(files, sources):
         c['read']+=bool(f.get('bytes_scanned'));c['fully_scanned']+=f['status']=='scanned'
         c['retained']+=(f.get('partition_offset'),f['path']) in retained
         c['text_parsed']+=bool(f.get('text_stream_parsed'))
-        c['unprocessed']+=f['status'] in ('deferred','pending','error','format_unparsed')
+        c['partial']+=f['status']=='partial'
+        c['unprocessed']+=f['status'] in ('deferred','pending','error','format_unparsed','partial')
         if critical(f['path']) and f['status']!='scanned':
             gaps.append({k:f.get(k) for k in ('path','partition_offset','status','reason','bytes_scanned','size')})
     return {'families':dict(families),'critical_gaps':sorted(gaps,key=lambda f:(f['path'],str(f['partition_offset'])))[:100],
