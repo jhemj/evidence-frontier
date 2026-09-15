@@ -102,6 +102,17 @@ class Hunter:
         if allowance<=0:status.update(status='deferred',reason='source family byte budget');return
         with node.open() as original:
             head=original.read(4);original.seek(0)
+            if item.get('baseline_sample'):
+                data=original.read(min(8192,allowance));self.remaining[category]-=len(data)
+                status.update(bytes_scanned=len(data),status='scanned' if len(data)==item['size'] else 'partial',reason='fixed unclassified raw sample; no semantic completeness')
+                digest=hashlib.sha256(data).hexdigest();relative='objects/'+digest+'.bin'
+                dest=self.run/relative
+                if not dest.exists():dest.write_bytes(data)
+                source={**item,'relative_path':relative,'sha256':digest,'complete':len(data)==item['size'],'source_offset':0,'status':'baseline_sample'}
+                self.sources.append(source)
+                self.emit({'type':'linux_baseline_sample','timestamp':None,'fields':{'path':path,'excerpt':data.decode(errors='replace'),
+                    'byte_offset':0,'byte_length':len(data),'interpretation_limit':'결정론적으로 선택한 미분류 파일 앞부분. 정상·악성 또는 전체 파일 검사 결과 아님'}},source)
+                return
             if head==b'\x7fELF':
                 data=original.read(min(32*CHUNK,allowance));self.remaining[category]-=len(data)
                 status.update(bytes_scanned=len(data),status='scanned' if len(data)==item['size'] else 'partial')
@@ -143,8 +154,6 @@ class Hunter:
                 self.parse(item,data,base,number,compressed)
                 for hit in text_hits(path,data,base,number):
                     key=(item['partition_offset'],path,hit['rule_id'],hit['excerpt'].strip())
-                    if key in self.seen:continue
-                    self.seen.add(key)
                     local=hit['byte_offset']-base; start=max(0,local-256);end=min(len(data),local+hit['byte_length']+256)
                     hit['byte_offset']=local-start
                     if compressed:hit['locator_basis']='gzip decompressed bytes'
@@ -154,8 +163,6 @@ class Hunter:
                 self.parse(item,pending,position-len(pending),number,compressed)
                 for hit in text_hits(path,pending,position-len(pending),number):
                     key=(item['partition_offset'],path,hit['rule_id'],hit['excerpt'].strip())
-                    if key in self.seen:continue
-                    self.seen.add(key)
                     hit['byte_offset']-=position-len(pending)
                     if compressed:hit['locator_basis']='gzip decompressed bytes'
                     self.keep(item,pending,position-len(pending),hit)

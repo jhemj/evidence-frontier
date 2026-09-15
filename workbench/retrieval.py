@@ -1,6 +1,7 @@
 """Bounded, resumable inspection of immutable retained sources."""
 import base64
 import codecs
+from contextvars import ContextVar
 import hashlib
 import json
 import re
@@ -8,21 +9,26 @@ from datetime import datetime, timezone
 
 SCAN_BUDGET = 64 * 1024 * 1024
 LINE_LIMIT = 1024 * 1024
+_decode_spans=ContextVar('retained_decode_spans',default=None)
 
 
-def literal_byte_hit(raw, query, minimum_end=0):
+def _replace_span(error):
+    spans=_decode_spans.get()
+    if spans is not None:spans.append((error.start,error.end))
+    return ('\ufffd',error.end)
+
+
+codecs.register_error('frontier_record_replace',_replace_span)
+
+
+def literal_byte_hit(raw, query, minimum_end=0, final=True):
     """Locate a casefolded UTF-8 literal in ORIGINAL bytes, including ß -> ss."""
     prefix=0
-    while prefix<min(3,len(raw)) and 0x80<=raw[prefix]<=0xbf:prefix+=1
-    try:text=codecs.getincrementaldecoder('utf-8')().decode(raw[prefix:],final=False)
-    except UnicodeDecodeError:
-        # Byte-exact ASCII lookup remains safe in otherwise undecodable logs.
-        if not query.isascii():return -1
-        start=0
-        while True:
-            found=raw.lower().find(query.encode(),start)
-            if found<0 or found+len(query)>minimum_end:return found
-            start=found+1
+    while minimum_end and prefix<min(3,len(raw)) and 0x80<=raw[prefix]<=0xbf:prefix+=1
+    spans=[];token=_decode_spans.set(spans)
+    try:text=codecs.getincrementaldecoder('utf-8')(errors='frontier_record_replace').decode(raw[prefix:],final=final)
+    finally:_decode_spans.reset(token)
+    invalid={prefix+start:end-start for start,end in spans}
     folded=text.casefold();start=0
     while True:
         found=folded.find(query,start)
@@ -31,7 +37,7 @@ def literal_byte_hit(raw, query, minimum_end=0):
         for char in text:
             following=folded_pos+len(char.casefold())
             if hit is None and following>found:hit=byte_pos
-            byte_pos+=len(char.encode('utf-8'));folded_pos=following
+            byte_pos+=invalid.get(byte_pos,len(char.encode('utf-8')));folded_pos=following
             if folded_pos>=found+len(query):end=byte_pos;break
         if end>minimum_end:return hit
         start=found+1
@@ -64,11 +70,14 @@ def source_origin(observation):
 
 def read_source(run, image, manifest, request):
     relative=request.path.removeprefix(run.name+'/')
-    source=next((s for s in manifest['sources'] if s.get('relative_path')==relative),None)
-    if source is None:raise ValueError('보존 원장에 등록된 원문만 조회할 수 있습니다.')
-    for selector in ('partition_offset','inode'):
+    candidates=[s for s in manifest['sources'] if s.get('relative_path')==relative]
+    for selector in ('partition_offset','inode','source_offset'):
         expected=getattr(request,selector)
-        if expected is not None and source.get(selector)!=expected:raise ValueError('보존 원문 객체 선택자가 일치하지 않습니다.')
+        if expected is not None:candidates=[s for s in candidates if s.get(selector,0 if selector=='source_offset' else None)==expected]
+    if not candidates:raise ValueError('보존 원장에 등록된 원문 또는 객체 선택자가 일치하지 않습니다.')
+    origins={(s.get('partition_offset'),s.get('inode'),s.get('path'),s.get('source_offset',0),s.get('locator_basis')) for s in candidates}
+    if len(origins)>1:raise ValueError('같은 보존 바이트의 원본이 여러 개입니다. 파티션·inode·source_offset을 지정하세요.')
+    source=candidates[0]
     path=(run/relative).resolve()
     if not path.is_relative_to(run.resolve()):raise ValueError('보존 원문 경로 범위 오류')
     with path.open('rb') as stream:
@@ -80,7 +89,7 @@ def read_source(run, image, manifest, request):
     fields={k:source.get(k) for k in ('path','partition_offset','inode','locator_basis')}
     fields.update(artifact_path=f'{run.name}/{relative}',source_sha256=source['sha256'],
         source_complete=source['complete'],byte_offset=request.byte_offset,byte_length=len(data),
-        image_file_byte_offset=source.get('source_offset',0)+request.byte_offset,
+        image_file_byte_offset=source.get('source_offset',0)+request.byte_offset,source_offset=source.get('source_offset',0),
         excerpt=data.decode(errors='replace'),next_byte_offset=end if end<size else None,
         hash_scope='full retained artifact, not necessarily full original file',
         stage='보존 원문 지정 구간',interpretation_limit='좌표 기준을 유지한 읽기. 압축 해제 좌표는 압축 파일 바이트 위치가 아님')
@@ -101,7 +110,7 @@ def search(run, image, manifest, request):
         path = (run/source['relative_path']).resolve()
         if not path.is_relative_to(run.resolve()):raise ValueError('원문 경로 범위 오류')
         files.append((path, source))
-    binding = hashlib.sha256(json.dumps(['retained-search-3',run.name, manifest, fingerprint_scope({**request.model_dump(), 'cursor':''}),
+    binding = hashlib.sha256(json.dumps(['retained-search-4',run.name, manifest, fingerprint_scope({**request.model_dump(), 'cursor':''}),
         [(p.name,p.stat().st_size,p.stat().st_mtime_ns) for p,_ in files]], sort_keys=True).encode()).hexdigest()
     fi=offset=line_number=watermark=0
     if request.cursor:
@@ -119,6 +128,8 @@ def search(run, image, manifest, request):
     next_cursor=''
     while fi < len(files):
         path,source=files[fi]
+        if request.source_offset is not None and (source is None or source.get('source_offset',0)!=request.source_offset):
+            fi+=1;offset=line_number=watermark=0;continue
         if source:
             # Verify before admitting ANY excerpts from this source.
             with path.open('rb') as stream:
@@ -137,7 +148,7 @@ def search(run, image, manifest, request):
                 fragment=not raw.endswith(b'\n') and len(raw)==LINE_LIMIT
                 if fragment:clipped+=1
                 item=None
-                hit=literal_byte_hit(raw,query,max(0,watermark-before)) if source else -1
+                hit=literal_byte_hit(raw,query,max(0,watermark-before),final=not fragment) if source else -1
                 if hit>=0 if source else query in text.casefold():
                     if source:
                         window_start=max(0,hit-1500)
@@ -188,4 +199,5 @@ def search(run, image, manifest, request):
         'raw_files':raw_files,'raw_bytes':examined,'unknown_time_excluded':unknown_time,'long_line_fragments':clipped,
         'query_semantics':'case-insensitive literal substring; spaces are literal, no AND/OR/regex',
         'scope':'This page of retained sources only; cursor continues exact same filters. Time filters exclude undated raw lines. Account is a literal token, not verified identity.',
+        'observation_preconditions':{'logging_enabled':'unknown','retention_continuity':'unknown','absence_can_refute_behavior':False},
         'negative_search':None if observations else '이 검색 페이지에서 일치 없음. 이미지 전체 또는 이전 페이지의 부재 아님'}

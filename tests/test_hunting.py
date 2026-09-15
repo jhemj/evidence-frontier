@@ -29,6 +29,22 @@ def test_literal_normal_controls(text):
     assert not list(text_hits('/tmp/inspection.sh',text.encode()))
 
 
+def test_repeated_weak_detections_preserve_each_occurrence_and_location(tmp_path):
+    h,events=hunter(tmp_path)
+    scan(h,b'* * * * * root /tmp/agent\n'*3,'/etc/cron.d/job')
+    hits=[e for e,s in events if e['type']=='linux_detection']
+    assert len(hits)==3
+    assert len({e['fields']['image_file_byte_offset'] for e in hits})==3
+
+
+def test_unclassified_sample_retains_raw_context_without_detection_label(tmp_path):
+    h,events=hunter(tmp_path);data=b'ordinary unknown format text'
+    item=dict(path='/srv/opaque',partition_offset=0,inode=9,size=len(data),mode=0o100644,mtime=0,baseline_sample=True)
+    h.scan(SimpleNamespace(open=lambda:io.BytesIO(data)),item)
+    assert events[0][0]['type']=='linux_baseline_sample'
+    assert (tmp_path/events[0][1]['relative_path']).read_bytes()==data
+
+
 def hunter(tmp_path):
     pytest.importorskip('yara')
     from workbench.hunt_stream import Hunter

@@ -57,7 +57,10 @@ def test_valid_second_response_is_new_judgment_not_rewritten_first_response(tmp_
 
 
 def failed_case(tmp_path):
-    c,cid,e,t,o=setup(tmp_path);seed(c,cid,e,t)
+    c,cid,e,t,o=setup(tmp_path)
+    for kind in ('linux_authentication','linux_persistence','linux_command'):
+        c.store.add('observation',cid,evidence_id=e['id'],type=kind,timestamp=None,source_location='fixture',fields={'path':'/var/log/fixture','excerpt':'inert'})
+    seed(c,cid,e,t)
     ds=c.store.list('dossier',cid)
     for d in ds:
         c.store.update(d['id'],status='model_failed')

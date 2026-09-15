@@ -22,7 +22,7 @@ python scripts/evaluate_report.py artifacts/hunt-validation/CASE_ID.zip
 
 `config/hunt-evaluation.json`은 사전 고정된 합성 자료 기준입니다. 탐지율은 미탐을 포함한 전체 정답을 분모로 사용하고, 정상 미처리를 TN으로 계산하지 않습니다. 미검토·실패는 판정률 분모에 남습니다. 이 지표는 합성 내용 및 구조 검증이며 실사건 침해 탐지율이 아닙니다.
 
-새 코드의 Windows Python 및 Linux 컨테이너 회귀 검사 130개가 각각 통과했습니다. GitHub의 Windows/Ubuntu 회귀 검사와 Ubuntu Docker 빌드·기동·HTTP smoke도 공개 직전 버전에서 통과했습니다. 공개 코드 검토와 수정 이후 비공개 실이미지를 새 case/run으로 시작하며, 완료 전에는 새 E2E 통과로 보고하지 않습니다. Ubuntu 사용자 호스트의 대용량 실이미지, 디스크 부족 상태의 실제 Docker 서비스, 모델 장애 상태의 새 전체 E2E는 미검증입니다. 기존 오류 처리·재시작·실행 불명 보존은 회귀 검사와 별도로 구분합니다.
+새 코드의 Windows Python 및 Linux 컨테이너 회귀 검사 143개가 각각 통과했습니다. GitHub의 Windows/Ubuntu 회귀 검사와 Ubuntu Docker 빌드·기동·HTTP smoke도 공개 직전 버전에서 통과했습니다. 공개 코드 검토와 수정 이후 비공개 실이미지를 새 case/run으로 시작하며, 완료 전에는 새 E2E 통과로 보고하지 않습니다. Ubuntu 사용자 호스트의 대용량 실이미지, 디스크 부족 상태의 실제 Docker 서비스, 모델 장애 상태의 새 전체 E2E는 미검증입니다. 기존 오류 처리·재시작·실행 불명 보존은 회귀 검사와 별도로 구분합니다.
 
 ## 공개 소스 범위
 

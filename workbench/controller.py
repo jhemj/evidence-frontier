@@ -23,6 +23,13 @@ class Controller:
         self.wake=threading.Event()
         self.stop=threading.Event()
         self.model_lock=threading.Lock()
+        from .runtime_contract import code_identity
+        self.runtime_code=code_identity()
+
+    def runtime_binding(self):
+        from .runtime_contract import binding
+        configs=self.store.list('config');provider=configs[-1].get('provider',{}) if configs else {}
+        return binding(self.runtime_code,provider)
 
     def recover(self):
         with self.store.tx():
@@ -116,6 +123,10 @@ class Controller:
             c=self.store.get(case_id,'case')
             if c['status'] in ('running','pause_requested'):return c
             if not self.active_ids(case_id):raise ValueError('먼저 증거를 연결하세요.')
+            current=self.runtime_binding()
+            if c.get('runtime_binding') and c['runtime_binding']['fingerprint']!=current['fingerprint']:
+                raise ValueError('조사 코드 또는 모델 조합이 변경되었습니다. 기존 기록을 보존하고 새 사건에서 시작하세요.')
+            if not c.get('runtime_binding'):self.store.update(case_id,runtime_binding=current)
             self.ensure_investigation(case_id)
             if c['status']=='paused' and c.get('epoch_id'):
                 epoch=self.store.get(c['epoch_id'])
@@ -257,6 +268,10 @@ class Controller:
         with self.store.tx():
             c=self.store.get(case_id)
             if c['status'] not in ('running','pause_requested'):return False
+            if c.get('runtime_binding') and c['runtime_binding']['fingerprint']!=self.runtime_binding()['fingerprint']:
+                self.store.update(case_id,status='paused',investigation_stage='실행 버전 변경으로 중단 · 기존 기록 보존')
+                self.store.audit(case_id,'runtime_contract_mismatch')
+                return False
             epoch=self.store.get(c['epoch_id'])
             active=self.active_ids(case_id)
             tasks=[t for t in self.store.list('task',case_id) if t['evidence_id'] in active and not t.get('superseded')]

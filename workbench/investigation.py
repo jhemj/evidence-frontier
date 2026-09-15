@@ -75,6 +75,8 @@ def compact_observation(original):
             artifact=original['fields'].get('artifact_path','')
             o['context_request']={'tool':'read_source','path':artifact,
                 'byte_offset':original['fields'].get('byte_offset',0),'byte_length':8192}
+            if original['fields'].get('image_file_byte_offset') is not None:
+                o['context_request']['source_offset']=max(0,original['fields']['image_file_byte_offset']-original['fields'].get('byte_offset',0))
         if len(original_excerpt)>len(shown):
             o['fields']['excerpt_truncated']=True
             o['context_request']['byte_length']=16384

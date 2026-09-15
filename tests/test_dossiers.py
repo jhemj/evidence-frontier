@@ -34,7 +34,7 @@ def test_checks_execute_before_reassessment_and_restart_is_idempotent(tmp_path,m
     for _ in range(25):
         result=finish(c,cid,e,t)
         if result:break
-    assert result['dossiers_reviewed']==4
+    assert result['dossiers_reviewed']==1 and result['unavailable_baselines']==3
     assert submitted and len(submitted)==len(set(submitted))
     assert any(p['executed_checks'] and any(o['type']=='linux_tool_result' for o in p['observations']) for p in calls)
     count=len(calls);assert finish(c,cid,e,t)==result and len(calls)==count
@@ -51,7 +51,8 @@ def test_model_failure_keeps_all_leads_and_baseline_areas(tmp_path,monkeypatch):
         if result:break
     assert result['status']=='failed'
     ds=c.store.list('dossier',cid)
-    assert len(ds)==4 and all(d['status']=='model_failed' for d in ds)
+    assert len(ds)==4 and sum(d['status']=='model_failed' for d in ds)==1
+    assert sum(d['status']=='unavailable' for d in ds)==3
     assert c.store.get(o['id'])['fields']['rule_id']=='writable_persistence'
     card=c.snapshot(cid)['visual_timeline']['cards'][0]
     assert card['review_status']=='model_failed' and '실패' in card['reason']

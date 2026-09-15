@@ -40,7 +40,7 @@ def is_repair(task):return task.get('repair_generation')==task.get('retry_genera
 
 def seed(controller,cid,evidence,task):
     store=controller.store
-    if any(belongs(r,task) for r in store.list('dossier_batch',cid)):return
+    if any(belongs(r,task) for r in store.list('dossier',cid)):return
     obs=[o for o in controller.active_observations(cid) if o['evidence_id']==evidence['id']]
     groups=defaultdict(list)
     for o in obs:
@@ -68,6 +68,8 @@ def seed(controller,cid,evidence,task):
             important=[o for o in settings if re.search(r'PermitRootLogin|PasswordAuthentication|AllowUsers|AllowGroups|NOPASSWD',o['fields'].get('excerpt',''),re.I)]
             items=important+items+settings
         packets.append((title,list({o['id']:o for o in items}.values()),True,('baseline',None,title)))
+    samples=[o for o in obs if o['type']=='linux_baseline_sample']
+    if samples:packets.append(('미분류 자료 원문 표본',samples,True,('baseline',None,'unclassified')))
     # No lead disappears: oversized review sets are recorded as deferred.
     dossiers=[]
     from .review_queue import family,schedule
@@ -78,7 +80,8 @@ def seed(controller,cid,evidence,task):
                          and set(d['finding']['observation_ids']).issubset(valid_ids)}
     with store.tx():
         for index,(title,items,baseline,key) in enumerate(packets):
-            selected=items[:4]+items[-4:] if len(items)>8 else items
+            from .source_selection import spread
+            selected=spread(items,8)
             ids=list(dict.fromkeys(o['id'] for o in selected))
             related=set()
             for o in items:
@@ -97,17 +100,17 @@ def seed(controller,cid,evidence,task):
                 deferred_since=(previous.get('deferred_since') or previous['created_at']) if previous else None,
                 previously_reviewed=group_key in previously_reviewed,
                 content_sha256=items[0]['fields'].get('source_sha256') if items and key[0].startswith('ELF_') else None,
-                status='pending',finding=None)
+                status='unavailable' if baseline and not items else 'pending',finding=None)
             dossiers.append(row)
         # Baselines are always reviewed even when many leads exist.
         if is_repair(task):
             targets=set(task['repair_group_keys'])
             ordered=[d for d in dossiers if d['group_key'] in targets]
             if {d['group_key'] for d in ordered}!=targets:raise ValueError('복구 대상의 원문 범위가 변경되었습니다.')
-        else:ordered=schedule(dossiers,limit=256, general_limit=96)
+        else:ordered=schedule([d for d in dossiers if d['status']!='unavailable'],limit=256, general_limit=96)
         admitted={d['id'] for d in ordered}
         for d in dossiers:
-            if d['id'] not in admitted:store.update(d['id'],status='deferred',
+            if d['id'] not in admitted and d['status']!='unavailable':store.update(d['id'],status='deferred',
                 error='Outside this limited failure recovery; previous reviews are historical, not revalidated' if is_repair(task) else 'AI source-family review budget; source observations retained',
                 deferred_reason='outside_repair_scope' if is_repair(task) else 'review_budget')
         for offset in range(0,len(ordered),3):
@@ -133,9 +136,17 @@ def finish(controller,cid,evidence,task):
         critical_pending=sum(d['status']!='reviewed' and d.get('review_family') in ('access','persistence','execution') for d in dossiers)
         limited=any(b.get('deferred_checks') or b['round']>=MAX_ROUNDS-1 for b in batches)
         deferred_count=sum(len(b.get('deferred_checks',[])) for b in batches)
+        termination_reasons=[]
+        if any(d['status']=='unavailable' for d in dossiers):termination_reasons.append('source_unavailable')
+        if any(d['status']=='model_failed' for d in dossiers):termination_reasons.append('model_failure_or_attempt_limit')
+        if any(d['status']=='deferred' for d in dossiers):termination_reasons.append('review_scope_limit')
+        if deferred_count:termination_reasons.append('duplicate_or_tool_budget')
+        if any(b['round']>=MAX_ROUNDS-1 for b in batches):termination_reasons.append('round_limit')
         result={'status':'partial' if pending or limited else 'covered','complete':not (pending or limited),'observations':[],'tool':'local-ai-dossiers-v2','judgment_counts':counts,
             'termination':'budget_or_round_limit' if limited else 'review_queue_processed','scope':'분할 검토 범위. 전체 침해 행위 부재를 의미하지 않음.',
             'dossiers_total':len(dossiers),'dossiers_reviewed':len(findings),'dossiers_unreviewed':pending,
+            'termination_reasons':termination_reasons or ['no_further_checks_requested'],
+            'unavailable_baselines':sum(d['status']=='unavailable' for d in dossiers),
             'critical_dossiers_unreviewed':critical_pending,'checks_deferred':deferred_count}
         if is_repair(task):result['limited_recovery']={k:task[k] for k in ('repair_source_generation','repair_group_keys','repair_source_dossier_ids','repair_budget')}
         with store.tx():
@@ -171,7 +182,12 @@ def finish(controller,cid,evidence,task):
     if batch['attempts']>=2 or model_exhausted(lifetime_attempts,is_repair(task)):
         with store.tx():
             for did in batch['dossier_ids']:store.update(did,status='model_failed',error='bounded model attempts exhausted')
-            store.update(batch['id'],status='failed')
+            assessed={(a['check_id'],a.get('dossier_id',''),a.get('contract_id','')) for a in (batch.get('output') or {}).get('check_assessments',[])}
+            missing=[{'check_id':jid,'dossier_id':c['dossier_id'],'contract_id':c['contract_id'],
+                'outcome':'inconclusive','reason':'검토 예산 소진으로 이 논리 계약은 미평가','observation_ids':[]}
+                for jid in batch['job_ids'] for c in contracts(store.get(jid))
+                if c['dossier_id'] in batch['dossier_ids'] and (jid,c['dossier_id'],c['contract_id']) not in assessed]
+            store.update(batch['id'],status='failed',unassessed_checks=missing)
         return None
     if not controller.model_lock.acquire(blocking=False):return None
     try:
@@ -280,9 +296,10 @@ def finish(controller,cid,evidence,task):
                 fingerprint=digest([task['id'],task.get('retry_generation',0),source_run,evidence['signature'],fingerprint_scope(call)])
                 old=next((j for j in jobs if j['fingerprint']==fingerprint),None)
                 if old:
-                    store.update(old['id'],dossier_ids=list(dict.fromkeys(old.get('dossier_ids',[old['request'].get('hypothesis_id')])+[call['hypothesis_id']])))
-                    store.update(old['id'],contracts=attach(store.get(old['id']),call))
-                    if old['id'] not in batch['job_ids']:admitted.append(old['id'])
+                    old=store.get(old['id'])
+                    new_contract=contract(call) not in contracts(old)
+                    store.update(old['id'],dossier_ids=list(dict.fromkeys(old.get('dossier_ids',[old['request'].get('hypothesis_id')])+[call['hypothesis_id']])),contracts=attach(old,call))
+                    if old['id'] not in batch['job_ids'] or new_contract:admitted.append(old['id'])
                     else:deferred.append({'request':call,'reason':'identical input already checked; no new scope'})
                     continue
                 if tools_exhausted(len(lifetime_jobs),len(jobs),is_repair(task)) or not source_run:

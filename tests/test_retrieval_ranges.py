@@ -94,3 +94,37 @@ def test_utf8_boundary_inside_multibyte_character_is_searchable(tmp_path,monkeyp
     monkeypatch.setattr('workbench.retrieval.LINE_LIMIT',100)
     result=request(tmp_path,query='침해흔적')
     assert len(result['observations'])==1 and '침해흔적' in result['observations'][0]['fields']['excerpt']
+
+
+def test_damaged_bytes_do_not_hide_valid_unicode_later_in_line(tmp_path):
+    from workbench.retrieval import literal_byte_hit
+    raw=b'prefix\xff\xfe'+('가'*3000+' Straße 침해흔적\n').encode()
+    search_fixture(tmp_path,raw=raw)
+    for query in ('strasse','침해흔적'):
+        result=request(tmp_path,query=query)
+        assert len(result['observations'])==1
+        fields=result['observations'][0]['fields']
+        assert query in fields['excerpt'].casefold()
+        hit=literal_byte_hit(raw,query)
+        assert raw[hit:].decode(errors='replace').casefold().startswith(query)
+
+
+def test_identical_retained_bytes_require_unambiguous_origin(tmp_path):
+    search_fixture(tmp_path,raw=b'needle retained\n')
+    run=tmp_path/('RUN-'+'a'*32);manifest=json.loads((run/'manifest.json').read_text())
+    first=manifest['sources'][0]
+    manifest['sources'].append({**first,'partition_offset':999,'inode':22,'source_offset':500})
+    (run/'manifest.json').write_text(json.dumps(manifest))
+    scope={'tool':'read_source','path':run.name+'/source.txt'}
+    assert request(tmp_path,**scope)['status']=='failed'
+    selected=request(tmp_path,**scope,partition_offset=999,inode=22,source_offset=500)
+    assert selected['observations'][0]['fields']['partition_offset']==999
+    assert selected['observations'][0]['fields']['image_file_byte_offset']==500
+
+
+@pytest.mark.parametrize('raw',[b'A\xffB',b'A\xe1\x80B',b'A\xef\xbf\xbdB'])
+def test_replacement_literal_preserves_python_decode_semantics(raw):
+    from workbench.retrieval import literal_byte_hit
+    assert raw.decode(errors='replace').casefold()=='a\ufffdb'
+    assert literal_byte_hit(raw,'a\ufffdb')==0
+    assert literal_byte_hit(raw,'\ufffdb')==1

@@ -23,8 +23,11 @@ def current(controller, case_id, source_observations=None):
     active = controller.active_ids(case_id)
     observations = {o['id'] for o in (source_observations if source_observations is not None else controller.active_observations(case_id)) if o['evidence_id'] in active}
     latest = {}
+    tasks={t['id']:t for t in controller.store.list('task',case_id) if not t.get('superseded')}
     for record in records:
         if record['evidence_id'] not in active: continue
+        task=tasks.get(record.get('task_id'))
+        if task is None or record.get('generation',0)!=task.get('retry_generation',0):continue
         if any(not set(f['observation_ids']).issubset(observations) for f in record['findings']): continue
         latest[record['evidence_id']] = record
     return list(latest.values())

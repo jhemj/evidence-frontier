@@ -76,7 +76,7 @@ def scan(image, output_root):
         except Exception as ex: scope.update(status='error', reason=str(ex))
     if not filesystems: raise ValueError('분석 가능한 Linux 루트 파일시스템을 찾지 못했습니다.')
     fs_by_offset = dict((off, fs) for fs, off in filesystems)
-    candidate_nodes = {}
+    candidate_nodes = {}; unclassified_samples=[]
     env = {'timezone': None, 'timezone_basis': '미확인', 'hostname': None, 'os': None}
     tz = None
     fs = filesystems[0][0]
@@ -118,6 +118,12 @@ def scan(image, output_root):
                         pending.extend(sorted((de.get() for de in node.scandir()),key=lambda n:n.path, reverse=True))
                     elif stat.S_ISREG(s.st_mode) and candidate(path, s.st_mode):
                         entries.append(item);candidate_nodes[(offset,path)]=node
+                    elif stat.S_ISREG(s.st_mode) and posixpath.basename(path) not in ('shadow','gshadow','id_rsa','id_dsa','id_ecdsa','id_ed25519') and not path.endswith(('.key','.pem')):
+                        # Fixed, content-independent sample of files outside the
+                        # candidate rules. No AI-selected keyword controls it.
+                        rank=hashlib.sha256(f'{offset}:{path}'.encode()).hexdigest()
+                        unclassified_samples.append((rank,item,node))
+                        unclassified_samples.sort(key=lambda x:x[0]);del unclassified_samples[16:]
                     elif stat.S_ISLNK(s.st_mode) and path.startswith('/etc/'):
                         entries.append(item)
                     if count % 2000 == 0: progress('linux_discovery', entries=count, candidates=len(entries), path=path)
@@ -126,6 +132,8 @@ def scan(image, output_root):
         total_entries+=count
     count=total_entries
     inventory.close()
+    for _,item,node in unclassified_samples:
+        entries.append({**item,'baseline_sample':True});candidate_nodes[(item['partition_offset'],item['path'])]=node
     events_file = (run / 'events.ndjson').open('w', encoding='utf-8')
     ledger = []; event_count = 0; group_overflow = 0; type_counts = {}; decoded_total = 0
 
@@ -137,7 +145,7 @@ def scan(image, output_root):
                       artifact_path=f"{run.name}/{source['relative_path']}", partition_offset=source['partition_offset'], inode=source['inode'])
         events_file.write(json.dumps(event, ensure_ascii=False) + '\n'); event_count += 1
         # Keep all records on disk; the interactive index groups repetitions.
-        key = json.dumps([source['path'], event['type'], fields.get('command'), fields.get('cwd'), fields.get('user'),
+        key = json.dumps([source['partition_offset'],source['inode'],source['path'], event['type'], fields.get('command'), fields.get('cwd'), fields.get('user'),
                           fields.get('address'), fields.get('outcome'), fields.get('state'),
                           fields.get('excerpt') if event['type'] not in ('linux_authentication', 'linux_cron_call', 'linux_command', 'linux_login_record') else None,
                           fields.get('host'), fields.get('record_type')], ensure_ascii=False)
@@ -231,8 +239,9 @@ def scan(image, output_root):
     from .package_audit import audit as package_audit
     package_results=[package_audit(fs,offset,hunter) for fs,offset in filesystems]
     ledger.extend(hunter.sources)
-    from .coverage_map import summarize
+    from .coverage_map import summarize, source_matrix
     coverage_map=summarize(hunter.files,ledger)
+    coverage_map['source_matrix']=source_matrix(run/'filesystem_inventory.ndjson',hunter.files,scopes,errors)
     (run/'hunt_files.ndjson').write_text(''.join(json.dumps(f,ensure_ascii=False)+'\n' for f in hunter.files),encoding='utf-8')
     events_file.close()
     manifest = {'version': VERSION, 'image': Path(image).name, 'run_id': run.name, 'environment': env, 'scopes': scopes,

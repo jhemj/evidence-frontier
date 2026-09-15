@@ -50,6 +50,7 @@ class ClaimStage(Strict):
 
 
 class CheckAssessment(Strict):
+    basis: Literal['positive_evidence','absence'] = 'positive_evidence'
     check_id: str = Field(max_length=100)
     dossier_id: str = Field(default='', max_length=100)
     contract_id: str = Field(default='', max_length=100)
@@ -71,6 +72,7 @@ class JudgmentFinding(Strict):
 
 
 class RetrievalScope(Strict):
+    source_offset: int | None = Field(default=None, ge=0)
     cursor: str = Field(default='', max_length=2000)
     limit: int = Field(default=30, ge=1, le=60)
     byte_offset: int = Field(default=0, ge=0)

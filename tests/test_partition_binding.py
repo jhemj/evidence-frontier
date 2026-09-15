@@ -33,6 +33,7 @@ def test_multiroot_read_requires_selection_and_checks_inode(tmp_path,monkeypatch
     assert result['observations'][0]['fields']['excerpt']=='SECOND_ROOT'
     assert result['observations'][0]['fields']['partition_offset']==2097152
     assert read(partition_offset=2097152,inode=41)['status']=='failed'
+    assert read(inode=42)['observations'][0]['fields']['partition_offset']==2097152
 
 
 def test_context_request_keeps_original_partition_and_inode():

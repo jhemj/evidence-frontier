@@ -23,7 +23,7 @@ def project(data):
         if o['type']=='linux_detection' and not o.get('timestamp'):
             return record_times.get(origin(o),{}).get('timestamp')
         return o.get('timestamp')
-    tasks={t['id']:t for t in data['task']}
+    tasks={t['id']:t for t in data['task'] if not t.get('superseded')}
     dossiers={d['id']:d for d in data.get('dossier',[]) if d['evidence_id'] in active and d['task_id'] in tasks
         and d.get('generation',0)==tasks[d['task_id']].get('retry_generation',0)}
     assessments={};history=[]

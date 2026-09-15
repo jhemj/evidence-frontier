@@ -22,7 +22,7 @@ def errors(output, dossier_ids, observation_ids, dossier_allowed=None, observati
             if observations and stage['judgment']=='확인' and stage['stage'] in ('execution','connection','objective'):
                 sources=[observations[oid] for oid in refs if oid in observations]
                 static_types={'linux_configuration','linux_persistence','linux_path_match','linux_binary','filesystem_time','linux_account',
-                    'linux_tool_result','linux_literal_match','linux_detection','linux_inspection_result','linux_ssh_trust','linux_persistence_link'}
+                    'linux_tool_result','linux_literal_match','linux_detection','linux_inspection_result','linux_ssh_trust','linux_persistence_link','linux_baseline_sample'}
                 if sources and all(o['type'] in static_types for o in sources):
                     issues.append({'code':'static_facts_not_behavior','dossier_id':f['dossier_id'],'stage':stage['stage']})
         unknown=sorted(set(f['observation_ids'])-allowed)
@@ -49,6 +49,8 @@ def check_errors(output, checks, allowed_by_dossier):
         if pair is None or key in seen:
             issues.append({'code':'invalid_check_assessment','id':key});continue
         seen.add(key);check,contract=pair
+        if assessment.get('basis')=='absence' and assessment['outcome']!='inconclusive':
+            issues.append({'code':'absence_preconditions_unverified','id':key})
         refs=set(assessment['observation_ids'])
         allowed=set(check.get('observation_ids',[]))
         if key[1]:allowed &= set(allowed_by_dossier.get(key[1],[]))

@@ -51,7 +51,9 @@ def execute_tool(evidence_root, analysis_root, body):
                 try:
                     node = fs.get(path); s = node.lstat()
                     if not stat.S_ISREG(s.st_mode): raise ValueError('일반 파일만 직접 읽을 수 있습니다. 링크는 실제 이미지 내부 경로를 선택하세요.')
-                    if request.inode is not None and s.st_ino != request.inode:raise ValueError('선택한 원문 inode가 일치하지 않습니다.')
+                    if request.inode is not None and s.st_ino != request.inode:
+                        if request.partition_offset is not None:raise ValueError('선택한 원문 inode가 일치하지 않습니다.')
+                        continue
                     candidates.append((volume, s, node))
                 except FileNotFoundError: continue
             if not candidates:raise ValueError('선택한 Linux 파일시스템에서 경로를 찾지 못했습니다. 과거 부재를 뜻하지 않습니다.')
