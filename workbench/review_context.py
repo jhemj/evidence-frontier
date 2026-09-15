@@ -2,6 +2,11 @@
 import json
 
 
+def serialize(value):
+    """Use the same lossless representation for budget checks and model input."""
+    return json.dumps(value,ensure_ascii=False,separators=(',',':'))
+
+
 def bounded(value, text=800, items=6):
     if isinstance(value,str):return value[:text]
     if isinstance(value,list):return [bounded(x,text,items) for x in value[:items]]
@@ -10,7 +15,7 @@ def bounded(value, text=800, items=6):
 
 
 def fit(pack, maximum=36000):
-    size=lambda:len(json.dumps(pack,ensure_ascii=False))
+    size=lambda:len(serialize(pack))
     if size()<=maximum:return
     pack['context_budget_compacted']=True
     if pack.get('previous_assessment'):

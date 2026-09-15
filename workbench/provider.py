@@ -6,6 +6,7 @@ import time
 from urllib.parse import urlsplit
 import httpx
 from .models import Analysis, Falsification, InvestigationPlan, JudgmentReport
+from .review_context import serialize
 
 
 def validate_url(url, trusted_lan=False):
@@ -139,7 +140,7 @@ class Provider:
                 'Return an empty tool_calls list only if further available tools cannot discriminate remaining questions. ')
             system+='Keep summary under 700 Korean characters, candidate claims at most 3, and each reasoning under 250 Korean characters. '
         messages=[{'role':'system','content':system+json.dumps(schema.model_json_schema())},
-                  {'role':'user','content':json.dumps({'question':question,'evidence_pack':pack},ensure_ascii=False)}]
+                  {'role':'user','content':serialize({'question':question,'evidence_pack':pack})}]
         start=time.monotonic()
         output_budget=4000 if role in ('investigator','judgment') else 2500
         try:

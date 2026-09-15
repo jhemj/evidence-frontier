@@ -27,6 +27,20 @@ def test_static_configuration_cannot_confirm_execution():
     assert any(i['code']=='static_facts_not_behavior' for i in result)
 
 
+def test_metadata_heavy_retry_fits_without_losing_source_fields():
+    import copy,json
+    from workbench.review_context import fit,serialize
+    pack={'observations':[{'id':f'o{i}','fields':{f'field{j}':j for j in range(40)},
+        'context_request':{'tool':'read_source','artifact_path':'run/source','byte_offset':i*100}}
+        for i in range(25)],'validation_feedback':{'errors':[{'code':'dossier_membership'}]}}
+    original=copy.deepcopy(pack)
+    limit=len(serialize(pack))
+    assert len(json.dumps(pack,ensure_ascii=False))>limit
+    fit(pack,maximum=limit)
+    assert pack==original
+    assert json.loads(serialize({'evidence_pack':pack}))['evidence_pack']==original
+
+
 def test_replacement_decoding_never_advances_byte_locator_from_text_length():
     from workbench.investigation import compact_observation
     o={'id':'o','type':'linux_literal_match','timestamp':None,'source_location':'image:/log',
