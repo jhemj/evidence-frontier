@@ -165,7 +165,8 @@ def execute(root, action, relative, progress=None):
             output_root.mkdir(parents=True,exist_ok=True)
             from .evidence_access import metadata as evidence_metadata
             signature=evidence_metadata(root,relative)['signature']
-            implementation=''.join(sha(Path(__file__).with_name(name)) for name in ('linux_scan.py','linux_analysis.py','hunt_stream.py','detection.py','package_audit.py'))
+            from .runtime_contract import code_identity
+            implementation=code_identity()
             cache_key=hashlib.sha256(json.dumps([signature,implementation,os.getenv('HUNT_BUDGET_GIB','8')]).encode()).hexdigest()
             cache_file=output_root/('cache-'+cache_key+'.json')
             if cache_file.exists():

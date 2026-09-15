@@ -12,6 +12,8 @@ app=FastAPI(docs_url=None,redoc_url=None)
 progress_lock=threading.Lock()
 progress_records={}
 job_manager=None
+from .runtime_contract import code_identity
+runtime_code=code_identity()
 
 def auth(x_worker_token:str=Header(default='')):
     secret=os.getenv('WORKER_TOKEN','')
@@ -81,3 +83,6 @@ def info(path:str):return metadata(os.getenv('EVIDENCE_ROOT','/evidence'),path)
 
 @app.get('/health')
 def health():return {'status':'ok'}
+
+@app.get('/runtime',dependencies=[Depends(auth)])
+def runtime():return {'source_sha256':runtime_code}

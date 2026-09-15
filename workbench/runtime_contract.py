@@ -23,6 +23,7 @@ def binding(code, provider):
         'release':os.getenv('FRONTIER_RELEASE','unrecorded'),
         'model_digest':os.getenv('FRONTIER_MODEL_DIGEST','unverified'),
         'worker_image':os.getenv('FRONTIER_WORKER_IMAGE','unverified'),
+        'worker_source':os.getenv('FRONTIER_WORKER_SOURCE_SHA256','unverified'),
         'model_relay':os.getenv('MODEL_RELAY_URL',''),
         'model_upstream':os.getenv('MODEL_UPSTREAM_URL',''),
         'investigation_model_calls':os.getenv('INVESTIGATION_MODEL_CALLS','12')}
@@ -32,6 +33,11 @@ def binding(code, provider):
 
 def guard(controller,case_id,task):
     current=controller.runtime_binding()
+    if os.getenv('WORKER_URL') and current['worker_source']!='unverified':
+        from .evidence_access import worker_request
+        actual=worker_request('GET','/runtime')
+        if actual.get('source_sha256')!=current['worker_source']:
+            raise ValueError('실행 조합 변경: 실제 worker 코드가 고정된 배포와 다릅니다.')
     case=controller.store.get(case_id)
     saved=controller.store.get(task['id']).get('runtime_binding') or case.get('runtime_binding')
     if saved and saved['fingerprint']!=current['fingerprint']:

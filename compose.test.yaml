@@ -1,6 +1,6 @@
 name: frontier-investigation-e2e
 services:
-  workbench:
+  gateway:
     ports: !override
       - "127.0.0.1:8767:8765"
   forensic-worker:

@@ -23,6 +23,9 @@ def test_duplicate_requests_publish_once_and_tampering_fails(tmp_path,monkeypatc
             time.sleep(.01)
         assert manager.status('a'*64)['status']=='succeeded' and len(calls)==1
         assert manager.status('a'*64)['attempts']==1
+        original=manager.runtime_code;manager.runtime_code='changed-build'
+        with pytest.raises(ValueError,match='실행 조합'):manager.status('a'*64)
+        manager.runtime_code=original
         file=manager.root/('a'*64+'.json');payload=json.loads(file.read_bytes());payload['result']['complete']=False;file.write_text(json.dumps(payload))
         with pytest.raises(ValueError,match='해시'):manager.status('a'*64)
     finally:close(manager)

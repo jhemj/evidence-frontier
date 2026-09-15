@@ -7,8 +7,6 @@ services:
     image: evidence-frontier:0.1.0
     init: true
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:${WORKBENCH_PORT:-8765}:8765"
     environment:
       DATA_ROOT: /app/data
       WORKER_URL: http://forensic-worker:8766
@@ -23,6 +21,7 @@ services:
       FRONTIER_RELEASE: ${FRONTIER_RELEASE:-unrecorded}
       FRONTIER_MODEL_DIGEST: ${FRONTIER_MODEL_DIGEST:-unverified}
       FRONTIER_WORKER_IMAGE: ${FRONTIER_WORKER_IMAGE:-unverified}
+      FRONTIER_WORKER_SOURCE_SHA256: ${FRONTIER_WORKER_SOURCE_SHA256:-unverified}
       ANALYSIS_ROOT: /analysis
       OPENRELIK_URL: ${OPENRELIK_URL:-}
       OPENRELIK_TOKEN: ${OPENRELIK_TOKEN:-}
@@ -42,6 +41,22 @@ services:
     cap_drop: [ALL]
     read_only: true
     tmpfs: ["/tmp:size=128M,mode=1777"]
+  gateway:
+    image: evidence-frontier:0.1.0
+    command: ["uvicorn","workbench.gateway:app","--host","0.0.0.0","--port","8765"]
+    init: true
+    restart: unless-stopped
+    ports: ["127.0.0.1:${WORKBENCH_PORT:-8765}:8765"]
+    depends_on:
+      workbench:
+        condition: service_healthy
+    networks: [model-plane,ui-ingress]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/tmp:size=32M,mode=1777"]
+    mem_limit: 256m
+    cpus: 1
   model-relay:
     image: evidence-frontier:0.1.0
     command: ["uvicorn","workbench.model_relay:app","--host","0.0.0.0","--port","8768"]
@@ -95,6 +110,7 @@ networks:
   model-plane:
     internal: true
   model-egress: {}
+  ui-ingress: {}
 volumes:
   case-data: {}
   analysis-data: {}

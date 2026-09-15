@@ -21,6 +21,8 @@ from uuid import uuid4
 
 class WorkerJobs:
     def __init__(self, root, evidence_root):
+        from .runtime_contract import code_identity
+        self.runtime_code=code_identity()
         self.root = Path(root) / 'jobs'; self.root.mkdir(parents=True, exist_ok=True)
         self.process_lock = (self.root/'worker.lock').open('a+b')
         if os.name == 'nt':
@@ -47,6 +49,7 @@ class WorkerJobs:
                 valid &= envelope['result_sha256'] == self.digest(envelope['result'])
                 attempt = self.db.execute('SELECT attempt_id FROM active_attempts WHERE job_id=?',(row['id'],)).fetchone()
                 valid &= bool(attempt and attempt[0] == envelope.get('attempt_id'))
+                valid &= envelope.get('runtime_code')==self.runtime_code
             except (OSError, ValueError, KeyError): valid = False
             self.db.execute('UPDATE jobs SET status=?,error=? WHERE id=?',
                             ('succeeded' if valid else 'execution_unknown', None if valid else '작업자 재시작: 이전 실행 생존 여부 확인 필요. 자동 재실행하지 않음', row['id']))
@@ -75,6 +78,7 @@ class WorkerJobs:
         output = self.root / (identity + '.json')
         if row['status'] == 'succeeded':
             envelope = json.loads(output.read_bytes())
+            if envelope.get('runtime_code')!=self.runtime_code:raise ValueError('실행 조합이 다른 worker 결과 재사용 차단')
             if envelope['result_sha256'] != self.digest(envelope['result']): raise ValueError('작업 결과 해시 불일치')
             state.update(result=envelope['result'], result_sha256=envelope['result_sha256'])
         return state
@@ -107,6 +111,7 @@ class WorkerJobs:
                 else: result = execute(self.evidence_root, body['action'], body['path'])
                 if metadata(self.evidence_root, body['path'])['signature'] != body['signature']: raise ValueError('실행 중 원본 구성이 변경되었습니다.')
                 envelope = {'result': result, 'result_sha256': self.digest(result),
+                            'runtime_code':self.runtime_code,
                             'attempt_id':attempt_id,
                             'request_sha256': hashlib.sha256(row['request'].encode()).hexdigest()}
                 content = json.dumps(envelope, ensure_ascii=False).encode()

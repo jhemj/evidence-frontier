@@ -291,6 +291,8 @@ class Controller:
             self.store.update(task['cell_id'],status='running')
             if not continuing:self.store.update(epoch['id'],jobs=epoch['jobs']+1)
         try:
+            from .runtime_contract import guard
+            guard(self,case_id,task)
             info=metadata(self.evidence_root,e['path'])
             if info['signature']!=e['signature']:
                 raise ValueError('등록 이후 증거가 변경되었습니다. 새 사건에서 다시 등록하세요.')
