@@ -62,7 +62,7 @@ class CheckAssessment(Strict):
 class JudgmentFinding(Strict):
     dossier_id: str = Field(default='', max_length=100)
     timeline_role: Literal['핵심','참고','반증됨'] = '핵심'
-    title: str = Field(min_length=1, max_length=240)
+    title: str = Field(min_length=1, max_length=240,description='짧은 명사형 제목: 대상 + 관측 사실. 판단 이유와 세부사항은 하위 필드에 기재.')
     judgment: Literal['확인', '유력', '미확인']
     reason: str = Field(min_length=1, max_length=700)
     observation_ids: list[str] = Field(default_factory=list, max_length=8)

@@ -21,25 +21,28 @@ def _replace_span(error):
 codecs.register_error('frontier_record_replace',_replace_span)
 
 
-def literal_byte_hit(raw, query, minimum_end=0, final=True):
+def literal_byte_hit(raw, query, minimum_end=0, final=True, with_boundary=False):
     """Locate a casefolded UTF-8 literal in ORIGINAL bytes, including ß -> ss."""
     prefix=0
     while minimum_end and prefix<min(3,len(raw)) and 0x80<=raw[prefix]<=0xbf:prefix+=1
     spans=[];token=_decode_spans.set(spans)
-    try:text=codecs.getincrementaldecoder('utf-8')(errors='frontier_record_replace').decode(raw[prefix:],final=final)
+    decoder=codecs.getincrementaldecoder('utf-8')(errors='frontier_record_replace')
+    try:text=decoder.decode(raw[prefix:],final=final)
     finally:_decode_spans.reset(token)
+    evaluated_end=len(raw)-len(decoder.getstate()[0])
+    def result(hit):return (hit,evaluated_end) if with_boundary else hit
     invalid={prefix+start:end-start for start,end in spans}
     folded=text.casefold();start=0
     while True:
         found=folded.find(query,start)
-        if found<0:return -1
+        if found<0:return result(-1)
         folded_pos=0;byte_pos=prefix;hit=None;end=0
         for char in text:
             following=folded_pos+len(char.casefold())
             if hit is None and following>found:hit=byte_pos
             byte_pos+=invalid.get(byte_pos,len(char.encode('utf-8')));folded_pos=following
             if folded_pos>=found+len(query):end=byte_pos;break
-        if end>minimum_end:return hit
+        if end>minimum_end:return result(hit)
         start=found+1
 
 
@@ -110,7 +113,7 @@ def search(run, image, manifest, request):
         path = (run/source['relative_path']).resolve()
         if not path.is_relative_to(run.resolve()):raise ValueError('원문 경로 범위 오류')
         files.append((path, source))
-    binding = hashlib.sha256(json.dumps(['retained-search-4',run.name, manifest, fingerprint_scope({**request.model_dump(), 'cursor':''}),
+    binding = hashlib.sha256(json.dumps(['retained-search-5',run.name, manifest, fingerprint_scope({**request.model_dump(), 'cursor':''}),
         [(p.name,p.stat().st_size,p.stat().st_mtime_ns) for p,_ in files]], sort_keys=True).encode()).hexdigest()
     fi=offset=line_number=watermark=0
     if request.cursor:
@@ -148,7 +151,7 @@ def search(run, image, manifest, request):
                 fragment=not raw.endswith(b'\n') and len(raw)==LINE_LIMIT
                 if fragment:clipped+=1
                 item=None
-                hit=literal_byte_hit(raw,query,max(0,watermark-before),final=not fragment) if source else -1
+                hit,evaluated_end=literal_byte_hit(raw,query,max(0,watermark-before),final=not fragment,with_boundary=True) if source else (-1,len(raw))
                 if hit>=0 if source else query in text.casefold():
                     if source:
                         window_start=max(0,hit-1500)
@@ -182,7 +185,7 @@ def search(run, image, manifest, request):
                         next_cursor=continuation();break
                     item['fields']['source_origin']=source_origin(item)
                     observations.append(item)
-                watermark=max(watermark,before+len(raw))
+                watermark=max(watermark,before+evaluated_end)
                 if fragment and source:
                     # A UTF-8 character uses at most four bytes. Overlap retains
                     # all possible boundary-spanning literal matches.

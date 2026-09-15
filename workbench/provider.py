@@ -76,7 +76,13 @@ class Provider:
                 'Search one discriminating token or an exact phrase per call, then inspect returned source context. '
                 'Omitted matches and truncated source searches are unexamined, not negative evidence. ')
         if role=='judgment':
-            system+=('In blind_source_review mode ignore prior interpretations and inspect source facts independently; same model does not imply statistically independent judgment. '
+            system+=('Write each title as a short Korean noun phrase: subject + specific recorded fact, ideally 15-45 characters. '
+                'For example, "사용자 계정의 SSH 인증 성공 기록", "예약 작업의 외부 스크립트 실행 설정". '
+                'Use only account names and facts actually present in the cited sources. Never copy an example account into results. '
+                'Keep explanations, qualifications, competing explanations and remaining checks in reason/alternatives/remaining_checks, not title. '
+                'Titles must preserve the fact level: a configuration is 설정, a recorded event is 기록, an uncertain action is 정황; never upgrade a title to proven intrusion. '
+                'Avoid full sentences, parenthetical commentary and generic prefixes such as 단서/근거 in titles. '
+                'In blind_source_review mode ignore prior interpretations and inspect source facts independently; same model does not imply statistically independent judgment. '
                 'Provide one to three relevant stages for each confirmed or probable finding. Use stages for relevant configuration, invocation, execution, connection, objective and intent statements. Each stage has its OWN confidence and source IDs. Never promote one stage automatically from another. '
                 'For each executed check contract return check_assessments with check_id, dossier_id and contract_id from its contracts list, supports/refutes/inconclusive, reason and IDs from that check. Execution status is not a verdict. '
                 'For next_checks provide success_condition, refutation_condition and inconclusive_condition BEFORE the check runs. If no distinguishing test exists, state that in remaining_checks. '

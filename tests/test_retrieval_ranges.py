@@ -11,6 +11,16 @@ def request(tmp_path, **fields):
         run_id='RUN-'+'a'*32,request={'tool':'search','query':'needle',**fields}))
 
 
+@pytest.mark.parametrize('pending',[b'\xe1',b'\xe1\x80'])
+@pytest.mark.parametrize('tail',[b'B\n',b''])
+def test_pending_decoder_bytes_are_not_marked_already_searched(tmp_path,pending,tail):
+    from workbench.retrieval import LINE_LIMIT
+    raw=b'x'*(LINE_LIMIT-len(b'needle'+pending))+b'needle'+pending+tail
+    result=search_fixture(tmp_path,raw=raw,query='needle\ufffd')
+    assert len(result['observations'])==1
+    assert 'needle\ufffd' in result['observations'][0]['fields']['excerpt']
+
+
 def test_pagination_reaches_late_raw_hits_and_binds_filters(tmp_path):
     first=search_fixture(tmp_path,indexed=45,raw=b'needle late\n')
     second=request(tmp_path,cursor=first['next_cursor'])

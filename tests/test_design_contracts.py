@@ -29,6 +29,16 @@ def test_source_selection_is_order_and_interpretation_independent():
     assert any(8<int(i)<17 for i in first)
 
 
+def test_multi_source_selection_spans_each_sources_full_range():
+    rows=[{'id':f'{source}-{i}','type':'linux_authentication','timestamp':f'2026-01-01T{i:04}',
+        'fields':{'path':source,'byte_offset':i}} for source in ('one','two') for i in range(100)]
+    selected=spread(rows,8)
+    for source in ('one','two'):
+        indices=[r['fields']['byte_offset'] for r in selected if r['fields']['path']==source]
+        assert len(indices)==4 and min(indices)==0 and max(indices)==99
+    assert selected==spread(list(reversed(rows)),8)
+
+
 def test_completed_search_without_logging_preconditions_is_inconclusive():
     checks=[{'id':'job','status':'covered_zero','observation_ids':['scope-record']}]
     output={'check_assessments':[{'check_id':'job','outcome':'refutes','basis':'absence',
