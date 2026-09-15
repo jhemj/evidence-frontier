@@ -248,6 +248,8 @@ def finish(controller,cid,evidence,task):
         context['dossier_allowed_ids']=allowed_by_dossier
         context['prompt_version']='forensic-provider-4'
         with store.tx():
+            guard(controller,cid,task)
+            provider_config=store.list('config')[-1]['provider']
             reservation=store.get(batch['id'])
             if reservation['status']!='pending' or reservation['round']!=batch['round'] or reservation['attempts']!=batch['attempts']:return None
             if model_exhausted(sum(r.get('task_id')==task['id'] for r in store.list('review_input',cid)),is_repair(task)):return None
@@ -257,7 +259,7 @@ def finish(controller,cid,evidence,task):
         store.update(cid,investigation_stage=f"단서별 정황·반증 검토 {sum(b['status']=='done' for b in batches)+1}/{len(batches)}")
         output=None;receipt={};issues=[]
         try:
-            output,receipt=Provider(store.list('config')[-1]['provider']).generate(
+            output,receipt=Provider(provider_config).generate(
                 '기본 점검 영역과 단서 각각을 독립적으로 검토하세요. 같은 자료의 반복을 독립 근거로 세지 마세요. '
                 '가장 타당한 설명·반대 근거·확인 가능한 다음 검사를 작성하세요. 제공된 각 dossier_id당 하나의 판단이 필요합니다.',pack,role='judgment')
             issues=validation_errors(output,batch['dossier_ids'],ids,allowed_by_dossier,all_obs)

@@ -70,7 +70,7 @@ def scan(image, output_root):
             else:
                 scope.update(status='excluded', reason='swap/지원하지 않는 파일시스템. 원시 영역·삭제 파일 복구 미수행'); continue
             try: fs.get('/etc/passwd')
-            except Exception:
+            except FileNotFoundError:
                 scope.update(status='excluded', reason='Linux 루트가 아님. 별도 마운트 볼륨의 파일 경로 연결 미수행'); continue
             scope['status'] = 'read_only'; filesystems.append((fs, vol.offset))
         except Exception as ex: scope.update(status='error', reason=str(ex))
@@ -97,13 +97,17 @@ def scan(image, output_root):
     inventory = (run / 'filesystem_inventory.ndjson').open('w', encoding='utf-8')
     for fs, offset in filesystems:
         roots = list(ROOTS)
-        for de in fs.get('/').scandir():
-            node = de.get()
-            if node.path not in roots and node.path not in EXCLUDE: roots.append(node.path)
+        try:
+            for de in fs.get('/').scandir():
+                node = de.get()
+                if node.path not in roots and node.path not in EXCLUDE: roots.append(node.path)
+        except Exception as ex:errors.append({'partition_offset':offset,'path':'/','operation':'root_enumeration','error':str(ex)[:500]})
         visited = set(); count = 0
         for path in roots:
             try:pending = [fs.get(path)]
-            except Exception:continue
+            except FileNotFoundError:continue
+            except Exception as ex:
+                errors.append({'partition_offset':offset,'path':path,'operation':'root_lookup','error':str(ex)[:500]});continue
             while pending and count < MAX_ENTRIES:
                 node = pending.pop();path = node.path
                 try:
@@ -127,7 +131,7 @@ def scan(image, output_root):
                     elif stat.S_ISLNK(s.st_mode) and path.startswith('/etc/'):
                         entries.append(item)
                     if count % 2000 == 0: progress('linux_discovery', entries=count, candidates=len(entries), path=path)
-                except Exception as ex: errors.append({'path': path, 'operation': 'enumeration', 'error': str(ex)[:500]})
+                except Exception as ex: errors.append({'partition_offset':offset,'path': path, 'operation': 'enumeration', 'error': str(ex)[:500]})
             if pending: errors.append({'path': path, 'operation': 'enumeration', 'error': 'namespace budget reached'})
         total_entries+=count
     count=total_entries

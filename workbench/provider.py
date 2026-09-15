@@ -63,6 +63,8 @@ class Provider:
         if not model:
             raise ValueError('설정에서 실제 모델 이름을 지정하세요.')
         expected=os.getenv('FRONTIER_MODEL_DIGEST','unverified')
+        if expected!='unverified' and model!=self.config['model']:
+            raise ValueError('digest를 고정한 검증 배포에서는 반증 모델도 기본 모델과 같아야 합니다.')
         if expected!='unverified' and self.config['protocol']=='ollama' and model==self.config['model']:
             response=self.client.get(self.base+'/api/tags');response.raise_for_status()
             actual=next((m.get('digest') for m in response.json().get('models',[]) if m.get('name')==model),None)

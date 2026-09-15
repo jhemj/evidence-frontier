@@ -72,6 +72,8 @@ class Investigation:
         try:
             # Reserve before transmission. A crash never refunds this reservation.
             with self.s.tx():
+                guard(self.c,self.case_id,self.task)
+                config=self.s.list('config')[-1]['provider']
                 reservation = self.s.add('model_reservation', self.case_id, task_id=self.task['id'], purpose=purpose, status='reserved')
                 self.s.update(run['id'], model_calls=run['model_calls'] + 1)
             try:output, receipt = Provider(config).generate(question, pack, role='investigator')
@@ -80,8 +82,8 @@ class Investigation:
                     self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='model_error',reservation_id=reservation['id'],error=str(ex))
                     self.s.update(reservation['id'],status='failed',error=str(ex))
                 return None
-            guard(self.c,self.case_id,self.task)
             with self.s.tx():
+                guard(self.c,self.case_id,self.task)
                 self.s.add('receipt', self.case_id, task_id=self.task['id'], evidence_id=self.e['id'], receipt_type='investigator_model', reservation_id=reservation['id'], **receipt)
                 self.s.update(reservation['id'], status='received', usage=receipt.get('usage'))
             return output
@@ -238,8 +240,10 @@ class Investigation:
             if not self.c.model_lock.acquire(blocking=False):raise ValueError('로컬 AI 응답 대기')
             try:
                 from .runtime_contract import guard
-                guard(self.c,self.case_id,self.task)
-                self.s.update(run['id'],review_calls=run.get('review_calls',0)+1)
+                with self.s.tx():
+                    guard(self.c,self.case_id,self.task)
+                    config=self.s.list('config')[-1]['provider']
+                    self.s.update(run['id'],review_calls=run.get('review_calls',0)+1)
                 self.s.update(self.case_id,investigation_stage='원문 대조 후 경쟁 설명 검토')
                 try:review,receipt=Provider(config).generate('실제로 실행한 검사와 원문을 바탕으로 다음 주장의 대안 설명·상충 근거·미완료 검사를 검토하세요. 동일 출처 재읽기를 독립 검증으로 부르지 마세요: '+claim['text'],pack,role='falsifier')
                 except (httpx.TransportError,ValueError) as ex:

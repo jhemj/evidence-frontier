@@ -156,3 +156,34 @@ def test_current_reviewed_dossier_is_visible_before_queue_finishes(tmp_path):
     assert second[0]['id']!=first[0]['id'] and second[0]['findings'][0]['timeline_role']=='반증됨'
     c.store.update(t['id'],retry_generation=1)
     assert current(c,cid)==[]
+
+
+def test_model_change_during_pack_is_rejected_before_reservation(tmp_path,monkeypatch):
+    import pytest
+    from test_dossiers import setup
+    from workbench.dossiers import finish
+    from workbench.review_context import fit
+    c,cid,e,t,o=setup(tmp_path)
+    def changed(pack):
+        fit(pack)
+        config=c.store.list('config')[-1]
+        c.store.update(config['id'],provider={**config['provider'],'model':'changed'})
+    monkeypatch.setattr('workbench.review_context.fit',changed)
+    def forbidden(*a,**k):raise AssertionError('model transmission must not occur')
+    monkeypatch.setattr('workbench.dossiers.Provider.generate',forbidden)
+    with pytest.raises(ValueError,match='실행 조합'):finish(c,cid,e,t)
+    assert not c.store.list('review_input',cid)
+
+
+def test_refuted_finding_is_separate_in_html_and_retained_in_json(tmp_path):
+    from test_dossiers import setup
+    from workbench.reporting import report_document,render
+    c,cid,e,t,o=setup(tmp_path)
+    f={'title':'거절된 해석 표식','judgment':'유력','timeline_role':'반증됨','reason':'반대 근거',
+       'observation_ids':[o['id']],'alternatives':[],'remaining_checks':[]}
+    c.store.add('dossier',cid,task_id=t['id'],evidence_id=e['id'],generation=0,status='reviewed',
+        finding=f,observation_ids=[o['id']],group_key='fixture',baseline=False)
+    doc=report_document(c,cid);html=render(doc)
+    current,history=html.split('<h2>반증된 해석</h2>')
+    assert f['title'] not in current and f['title'] in history
+    assert doc['judgments'][0]['findings'][0]==f
