@@ -77,6 +77,9 @@ class Provider:
                 'Use cursor to continue search, path to limit exact path/subtree, account as literal token, time_from/time_to with explicit timezone (undated lines are excluded). Use read_file byte_offset/byte_length for original file byte ranges. Preserve partition_offset and inode from the source; ambiguous paths across multiple filesystems are rejected. Decompressed offsets cannot be passed as original compressed-file offsets. read_source uses artifact_path from evidence and byte_offset within retained bytes, preserving its recorded coordinate basis. '
                 'Search one discriminating token or an exact phrase per call, then inspect returned source context. '
                 'Omitted matches and truncated source searches are unexamined, not negative evidence. ')
+        if role in ('analyst','investigator'):
+            system+=('Write candidate claim text as a short Korean noun phrase: subject + recorded fact, ideally 15-45 characters. '
+                'Keep detailed explanations and qualifications in uncertainty and alternatives. Preserve distinctions between configuration, command records and proven actions. ')
         if role=='judgment':
             system+=('Write each title as a short Korean noun phrase: subject + specific recorded fact, ideally 15-45 characters. '
                 'For example, "사용자 계정의 SSH 인증 성공 기록", "예약 작업의 외부 스크립트 실행 설정". '
