@@ -23,3 +23,12 @@ def test_gateway_keeps_fixed_authority_and_streams_response(monkeypatch):
 def test_gateway_rejects_oversized_mutation():
     with TestClient(gateway.app) as client:
         assert client.post('/api/cases',content=b'x'*(1024*1024+1)).status_code==413
+
+
+def test_gateway_serves_only_public_ui_assets():
+    with TestClient(gateway.app) as client:
+        response=client.get('/')
+        assert 'investigation-progress' in response.text
+        assert "script-src 'self'" in response.headers['content-security-policy']
+        assert client.get('/progress.js').status_code==200
+        assert 'workbench/gateway.py' not in gateway.UI_FILES

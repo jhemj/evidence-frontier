@@ -9,6 +9,8 @@
     <link rel="stylesheet" href="/timeline.css?v=20260914-timeline-2" />
     <script src="/timeline.js?v=20260914-timeline-2" defer></script>
     <script src="/app.js?v=20260914-timeline-2" defer></script>
+    <link rel="stylesheet" href="/progress.css?v=1" />
+    <script src="/progress.js?v=1" defer></script>
   </head>
   <body>
     <div class="shell">
@@ -85,6 +87,7 @@
             ><button data-tab="report">보고서</button>
           </nav>
           <div id="panel-investigate" class="panel investigation">
+            <section id="investigation-progress" class="investigation-progress" aria-label="조사 진행 현황"></section>
             <section id="visual-timeline" class="visual-timeline" aria-label="증거 타임라인"></section>
             <section class="conversation">
               <div class="conversation-heading">

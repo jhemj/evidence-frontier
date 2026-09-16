@@ -8,9 +8,18 @@
 
 **현재 버전: 0.1.0 개발 프리뷰.** 실행 가능한 첫 구현입니다. 대형 실제 사건용 전체 Windows/Linux 아티팩트 제품이 완성되었다는 의미는 아닙니다. 상세 범위는 [구현 현황](docs/STATUS.md)에 있습니다.
 
+상단 진행 카드에는 **경과시간, 현재 단계, 단서 처리 막대, 검토 완료·실패·보류·남은 단서**가 표시됩니다. ETA는 충분한 처리 이력이 쌓인 뒤 현재 AI 판단 단계의 평균 처리 속도로 계산하며, 자료 수집과 보고서 저장을 포함한 전체 종료 시각은 아닙니다. 처리율은 작업 큐 기준이며 침해 탐지율이나 분석 완결성을 뜻하지 않습니다.
+
 ## 빠른 시작
 
 Windows 11 + Docker Desktop(WSL2, Linux containers), 또는 Ubuntu 22.04/24.04 + Docker Engine/Compose v2가 필요합니다. 웹 UI를 포함한 모든 애플리케이션 의존성은 이미지에 들어갑니다. 최초 빌드는 인터넷이 필요합니다.
+
+Git으로 저장소를 내려받습니다. GitHub의 **Code → Download ZIP**을 사용한다면 압축을 풀고 해당 폴더에서 설치 명령을 실행해도 됩니다.
+
+```bash
+git clone https://github.com/jhemj/evidence-frontier.git
+cd evidence-frontier
+```
 
 Windows PowerShell:
 
@@ -25,6 +34,8 @@ bash scripts/setup.sh
 ```
 
 접속: **http://localhost:8765**
+
+설치 스크립트는 `.env.example`을 바탕으로 로컬 `.env`와 작업자 통신용 임의 `WORKER_TOKEN`을 생성합니다. UI 접속 암호는 기본값이 비어 있으며, `.env`에 `WORKBENCH_TOKEN`을 설정한 경우 그 값을 입력합니다. 이 파일과 토큰은 공유하지 마세요. 로컬 AI 서버와 모델 가중치는 별도로 준비해야 합니다.
 
 첫 화면의 **예제 증거로 흐름 살펴보기**를 누르면 합성 사건을 생성하고 실제 파일 해시·NDJSON 수입·타임라인·경로 연관 조사를 수행합니다. AI가 연결되지 않은 상태는 명확하게 표시합니다.
 
@@ -69,6 +80,26 @@ Windows Docker Desktop은 호스트 별칭을 지원하며 Ubuntu Compose에는 
 조사가 끝나면 AI가 중간 해석을 종합해 **확인 / 유력 / 미확인**으로 판단하고 결과와 보고서를 자동 생성합니다. 사용자의 승인·제외 절차는 필요 없습니다. 확인은 원문이 직접 뒷받침하는 구체적 사실, 유력은 정황상 가장 타당한 설명, 미확인은 자료 부족 또는 상충 상태입니다. 각 판단의 이유·근거·대안 설명·남은 검사를 함께 보존하며 유력한 결과도 보고서에 포함합니다.
 
 기본 ZIP: `report.html`, `report.json`, `manifest.json`, `SHA256SUMS`. Linux 내용 조사에는 `TIMELINE.csv`, `IOC_LIST.csv`, `HYPOTHESES.json`, `EVIDENCE_MANIFEST.csv`, `REPORT_EVIDENCE_MAP.csv`, `RESULT_REVISION.json`과 해시 검증한 추출 원문을 추가합니다. 외부 JS·폰트 없이 오프라인으로 열 수 있습니다. 사용자 양식은 `templates/report.html`로 교체하며 데이터 계약은 [보고서 계약](docs/REPORT_CONTRACT.md)에 있습니다.
+
+공개 저장소에는 프로그램과 합성 예제, 일반적인 사용 문서를 포함합니다. 실제 증거, 사건별 결과 ZIP, 상세 분석·검토 보고서, 로컬 설정과 API 키는 게시하지 않습니다. `artifacts/`, `data/`, `evidence/`, `reports/`, `.env`는 Git 추적에서 제외됩니다.
+
+## 종료와 업데이트
+
+서비스를 멈추거나 다시 실행할 때는 다음 명령을 사용합니다. 조사 중에는 먼저 UI에서 일시정지를 요청하고 현재 작업이 마무리됐는지 확인하세요.
+
+```bash
+docker compose stop
+docker compose start
+```
+
+업데이트는 진행 중인 조사가 종료된 뒤 결과를 보존하고 수행합니다.
+
+```bash
+git pull --ff-only origin main
+docker compose up --build -d --wait
+```
+
+사건별 코드·모델 조합을 기록하므로 업데이트 후 과거 사건의 이어가기가 제한될 수 있습니다. DB의 실행 버전 기록을 수정해 우회하지 마세요. Docker volume에 사건 데이터가 있으므로 보존하려면 `docker compose down -v`를 사용하지 않습니다. 별도 이미지 고정 구성을 쓰는 운영 환경은 [배포 안내](docs/DEPLOYMENT.md)를 따릅니다.
 
 ## OpenRelik
 

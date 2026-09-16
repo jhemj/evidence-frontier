@@ -15,6 +15,7 @@ let current = null,
   busy = false,
   searchOffset = 0;
 let refreshInFlight = false;
+let progressReceivedAt = 0;
 const evidenceTypes = {linux_detection:"침해 관련 단서",linux_environment:"분석 환경",linux_coverage:"수집 범위",linux_command:"명령 기록",linux_authentication:"인증 기록",linux_session:"세션·권한",linux_persistence:"자동 실행 설정",linux_cron_call:"예약 작업 호출",linux_binary:"실행파일 정적 정보",linux_account:"계정",linux_ssh_trust:"SSH 신뢰 설정",linux_inspection_result:"이전 점검 결과",linux_network:"통신 기록",linux_tool_result:"추가 검사 결과",linux_path_match:"파일 경로",linux_literal_match:"원문 검색 일치",linux_persistence_link:"설정·호출 대조",linux_audit_group:"동일 audit 사건",linux_audit:"audit 기록",linux_login_record:"로그인 기록",linux_configuration:"설정",linux_system_event:"시스템 기록"};
 const labels = {
   ready: "준비됨",
@@ -113,6 +114,7 @@ async function refresh() {
   const nextSnapshot = await api("/cases/" + requestedCase + (revision ? "?since="+encodeURIComponent(revision) : ""));
   if (current !== requestedCase) return;
   snapshot = nextSnapshot.unchanged ? {...snapshot,case:nextSnapshot.case,task:nextSnapshot.task,evidence:nextSnapshot.evidence} : nextSnapshot;
+  progressReceivedAt = Date.now();
   renderSnapshot();
   if (previousCase?.id === current && previousCase.status !== snapshot.case.status)
     await listCases();
@@ -121,6 +123,7 @@ async function refresh() {
 function renderSnapshot() {
   const s = snapshot,
     c = s.case;
+  renderInvestigationProgress(s, progressReceivedAt);
   const timelineSources = new Set(s.evidence.filter(e=>e.connected!==false).map(e=>e.id));
   const timelineTasks = s.task.filter(t=>timelineSources.has(t.evidence_id));
   const timelineTask = timelineTasks.find(t => t.status === "running") || timelineTasks.find(t => t.status === "queued");
@@ -567,6 +570,7 @@ async function init() {
   if (cases.length && !current) await selectCase(cases[0].id);
 }
 perform(init);
+setInterval(() => { if (snapshot && !document.hidden) renderInvestigationProgress(snapshot, progressReceivedAt); }, 1000);
 setInterval(() => {
   if (current && !document.hidden && !busy)
     perform(async () => {

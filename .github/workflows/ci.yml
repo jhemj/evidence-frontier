@@ -19,6 +19,8 @@ jobs:
         with:
           node-version: '22'
       - run: node --check dist/app.js
+      - run: node --check dist/progress.js
+      - run: node tests/progress.test.cjs
   containers:
     runs-on: ubuntu-24.04
     steps:
