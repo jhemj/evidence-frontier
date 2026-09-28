@@ -1,0 +1,14 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ view.title }} · {{ view.reader_name }}</title>
+<style>
+@page{size:A4;margin:19mm 20mm}*{box-sizing:border-box}body{font:10.5pt/1.65 "Noto Sans CJK KR","Malgun Gothic",sans-serif;color:#111;background:white;max-width:210mm;margin:24px auto;padding:19mm 20mm}h1{font-size:18pt;text-align:center;margin:0 0 10mm;font-weight:700}h2{font-size:13pt;margin:9mm 0 3mm}h3{font-size:11pt;margin:6mm 0 2mm}h2,h3{break-after:avoid}p{margin:2mm 0 4mm;white-space:pre-wrap;overflow-wrap:anywhere}.meta,.refs,footer{font-size:9pt;color:#444}table{border-collapse:collapse;width:100%;table-layout:fixed;margin:3mm 0 5mm;font-size:9.5pt}th,td{border:1px solid #999;padding:2.2mm;vertical-align:top;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere}th{background:#ededed;color:#111}thead{display:table-header-group}a{color:inherit;text-underline-offset:2px}.page-break{break-before:page;margin-top:12mm}.state{font-weight:700}.anchor{scroll-margin-top:20px}footer{margin-top:8mm;border-top:1px solid #999;padding-top:3mm}@media print{body{padding:0;margin:0;max-width:none}.page-break{margin-top:0}a{text-decoration:none}}
+@media screen and (max-width:600px){body{margin:0;padding:24px 16px;font-size:10pt}h1{font-size:15pt;margin-bottom:20px}h2{margin-top:25px}table{font-size:8.5pt}th,td{padding:6px}.meta{font-size:8pt}.page-break{margin-top:30px}}
+</style></head><body data-report-id="{{ view.report_id }}" data-reader="{{ view.reader }}" data-contract="{{ view.version }}">
+<h1>{{ view.title }}</h1><p class="state">{{ view.reader_name }} · {{ view.status }}</p><p class="meta">기준시각 {{ view.generated_at }}<br>보고서 {{ view.report_id }}</p>
+{% for b in view.blocks %}
+{% if b.kind=='heading' %}{% if b.level==1 %}<h2>{{ b.text }}</h2>{% else %}<h3>{{ b.text }}</h3>{% endif %}
+{% elif b.kind=='paragraph' %}<p>{{ b.text }}</p>
+{% elif b.kind=='page_break' %}<div class="page-break"></div>
+{% elif b.kind=='anchor' %}<div class="anchor" id="{{ b.id }}"></div>
+{% elif b.kind=='citations' %}<p class="refs">근거: {% for id in b.ids %}<a href="#{{ id }}">{{ id }}</a>{% if not loop.last %} · {% endif %}{% else %}직접 인용 근거 없음{% endfor %}</p>
+{% elif b.kind=='table' and b.rows %}<table>{% if b.widths %}<colgroup>{% for width in b.widths %}<col style="width:{{ width/170*100 }}%">{% endfor %}</colgroup>{% endif %}<thead><tr>{% for value in b.headers %}<th>{{ value }}</th>{% endfor %}</tr></thead><tbody>{% for row in b.rows %}<tr>{% for value in row %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}
+{% endfor %}<footer>{{ view.redaction_notice }}</footer></body></html>

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "fixture": "hunt-controls.E01",
+  "scope": "Inert content controls, not actual execution or real-case intrusion ground truth",
+  "positive_rules": ["extra_uid_zero", "writable_persistence", "download_execute", "webshell_code", "ELF_socket_filter_and_process_disguise"],
+  "normal_paths": ["/opt/maintenance/check.sh"],
+  "minimum_pattern_recall": 1.0,
+  "maximum_normal_pattern_false_positives": 0,
+  "minimum_dossier_review_rate": 1.0,
+  "maximum_unknown_citations": 0,
+  "forbidden_confirmed_stages": ["objective"],
+  "denominators": {
+    "pattern_recall": "Detected expected rule families / ALL expected rule families, including missed or failed scans",
+    "normal_pattern_false_positive_rate": "FP / (FP + TN) among scanned normal controls only; unscanned controls are not TN",
+    "review_rate": "Reviewed current dossiers / ALL current dossiers; failures and deferred dossiers remain in denominator",
+    "stage_scope_violations": "Confirmed forbidden success stages in inert fixture; no claim of complete semantic grading"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "version": "investigation-quality-1",
+  "notice": "Synthetic choices only. No private incident evidence. The answer key is not model input.",
+  "cases": [
+    {"case_id":"time-kind","question":"예약 작업의 실제 실행 시각을 판단할 수 있는가?","observations":[{"id":"T1","fact":"파일 mtime 09:00"},{"id":"T2","fact":"cron 호출 기록 10:00, 완료 기록 없음"}],"conclusion_choices":["execution_at_0900","dispatch_at_1000_success_unknown"],"test_choices":["execution_result_logs","repeat_file_mtime"]},
+    {"case_id":"lineage","question":"같은 원문을 두 파서가 읽었으면 독립 증거 두 개인가?","observations":[{"id":"L1","fact":"parser A, source SHA256 abc, record 42"},{"id":"L2","fact":"parser B, source SHA256 abc, record 42"}],"conclusion_choices":["independent_corroboration","same_source_lineage"],"test_choices":["independent_source","repeat_same_parser"]},
+    {"case_id":"older-page","question":"최근 검색 0건이면 이전 접속도 없었는가?","observations":[{"id":"P1","fact":"최근 1페이지 0건, next_cursor 있음"},{"id":"P2","fact":"이전 기간 원문은 보존되어 있으나 아직 검색하지 않음"}],"conclusion_choices":["no_access","older_scope_unexamined"],"test_choices":["continue_cursor","declare_clean"]},
+    {"case_id":"new-pivot","question":"예약 설정에서 새 대상 경로를 찾은 뒤 무엇을 할 것인가?","observations":[{"id":"D1","fact":"Task Command C:\\ProgramData\\fixture.exe"},{"id":"D2","fact":"보존된 실행 기록의 이 경로 검색은 아직 미수행"}],"conclusion_choices":["execution_proven","configuration_only"],"test_choices":["search_exact_path","download_payload"]},
+    {"case_id":"network","question":"PowerShell에 다운로드 명령이 있으면 유출 성공인가?","observations":[{"id":"N1","fact":"4104에 다운로드 명령 문자열"},{"id":"N2","fact":"상응하는 연결·응답·전송 완료 기록 미제공"}],"conclusion_choices":["exfiltration_proven","success_unestablished"],"test_choices":["network_result_records","infer_from_script"]},
+    {"case_id":"second-cluster","question":"SSH 단서를 조사하면서 별도의 예약 작업이 발견되었다. 어떻게 처리할 것인가?","observations":[{"id":"S1","fact":"인증 기록의 알려진 조사 단서"},{"id":"S2","fact":"별도 계정의 신규 예약 대상 경로, 승인·실행 여부 미상"}],"conclusion_choices":["ignore_unrelated_cluster","retain_separate_lead"],"test_choices":["inspect_second_target","close_after_ssh"]}
+  ]
+}

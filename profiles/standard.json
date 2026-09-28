@@ -1,0 +1,1 @@
+{"id":"standard","name":"표준 조사","version":"1","cells":[{"action":"integrity","label":"증거 무결성","phase":0},{"action":"inventory","label":"저장 구조 확인","phase":1},{"action":"normalize","label":"관측 기록 정리","phase":2},{"action":"timeline","label":"기본 타임라인","phase":3},{"action":"crosscheck","label":"독립 도구 교차 확인","phase":4}]}

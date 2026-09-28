@@ -1,0 +1,1 @@
+{"id":"triage","name":"빠른 확인","version":"1","cells":[{"action":"integrity","label":"증거 무결성","phase":0},{"action":"inventory","label":"저장 구조 확인","phase":1},{"action":"normalize","label":"관측 기록 정리","phase":2}]}

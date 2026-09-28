@@ -1,0 +1,3 @@
+{"type":"windows_event","timestamp":"2026-09-01T09:21:12+09:00","source_location":"Microsoft-Windows-PowerShell/Operational:record:1042","fields":{"event_id":4104,"user":"LAB\\analyst","path":"C:\\Lab\\maintenance.ps1","message":"Scheduled inventory script executed"}}
+{"type":"process_event","timestamp":"2026-09-01T00:21:13Z","source_location":"Security:record:2015","fields":{"event_id":4688,"user":"LAB\\analyst","path":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","parent":"taskeng.exe"}}
+{"type":"management_log","timestamp":"2026-09-01T00:20:00Z","source_location":"management.log:line:38","fields":{"path":"C:\\Lab\\maintenance.ps1","message":"Approved inventory deployment; synthetic example, not a real incident"}}

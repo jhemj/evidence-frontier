@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+artifacts/
+data/
+evidence/
+reports/
+*.sqlite3
+*.db
+*.e01
+*.E01

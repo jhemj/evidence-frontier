@@ -1,0 +1,242 @@
+"""Bounded, resumable inspection of immutable retained sources."""
+import base64
+import codecs
+from contextvars import ContextVar
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
+
+SCAN_BUDGET = 64 * 1024 * 1024
+LINE_LIMIT = 1024 * 1024
+_decode_spans=ContextVar('retained_decode_spans',default=None)
+
+
+def _replace_span(error):
+    spans=_decode_spans.get()
+    if spans is not None:spans.append((error.start,error.end))
+    return ('\ufffd',error.end)
+
+
+codecs.register_error('frontier_record_replace',_replace_span)
+
+
+def literal_byte_hit(raw, query, minimum_end=0, final=True, with_boundary=False):
+    """Locate a casefolded UTF-8 literal in ORIGINAL bytes, including ß -> ss."""
+    prefix=0
+    while minimum_end and prefix<min(3,len(raw)) and 0x80<=raw[prefix]<=0xbf:prefix+=1
+    spans=[];token=_decode_spans.set(spans)
+    decoder=codecs.getincrementaldecoder('utf-8')(errors='frontier_record_replace')
+    try:text=decoder.decode(raw[prefix:],final=final)
+    finally:_decode_spans.reset(token)
+    evaluated_end=len(raw)-len(decoder.getstate()[0])
+    def result(hit):return (hit,evaluated_end) if with_boundary else hit
+    invalid={prefix+start:end-start for start,end in spans}
+    folded=text.casefold();start=0
+    while True:
+        found=folded.find(query,start)
+        if found<0:return result(-1)
+        folded_pos=0;byte_pos=prefix;hit=None;end=0
+        for char in text:
+            following=folded_pos+len(char.casefold())
+            if hit is None and following>found:hit=byte_pos
+            byte_pos+=invalid.get(byte_pos,len(char.encode('utf-8')));folded_pos=following
+            if folded_pos>=found+len(query):end=byte_pos;break
+        if end>minimum_end:return result(hit)
+        start=found+1
+
+
+def tool_scope(call):
+    from .models import InvestigationTool
+    return InvestigationTool(**{k:v for k,v in call.items() if k in InvestigationTool.model_fields}).model_dump()
+
+
+def fingerprint_scope(call):
+    scope = tool_scope(call)
+    tool = scope.get('tool')
+    # static_file and archive_list always inspect the selected object from
+    # byte zero up to their own fixed safety cap; caller byte ranges therefore
+    # do not change the operation and must not create duplicate jobs.  The
+    # identity selectors remain part of the scope (same path on another
+    # partition/inode is a different object).
+    if tool in ('static_file', 'archive_list'):
+        return {k: scope.get(k) for k in ('tool', 'path', 'partition_offset', 'inode')}
+    return {k:v for k,v in scope.items() if k != 'reason'}
+
+
+def time_value(value):
+    if not value:return None
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.tzinfo is None:raise ValueError('시간 필터에는 시간대가 필요합니다.')
+    return parsed.astimezone(timezone.utc)
+
+
+def source_origin(observation):
+    f = observation.get('fields', {})
+    # Conservatively treat repeated extraction and parsed/raw copies of one file
+    # as ONE origin. This does not assert independence of different files.
+    identity = [observation.get('evidence_id'), f.get('partition_offset'), f.get('path'), f.get('inode')]
+    if observation.get('type','').startswith('windows_'):
+        identity += [f.get('os_instance'),f.get('volume_id'),f.get('snapshot_id'),f.get('source_path')]
+    if not f.get('path'):identity += [observation.get('source_location')]
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+
+
+def read_source(run, image, manifest, request):
+    relative=request.path.removeprefix(run.name+'/')
+    candidates=[s for s in manifest['sources'] if s.get('relative_path')==relative]
+    for selector in ('partition_offset','inode','source_offset'):
+        expected=getattr(request,selector)
+        if expected is not None:candidates=[s for s in candidates if s.get(selector,0 if selector=='source_offset' else None)==expected]
+    if not candidates:raise ValueError('보존 원장에 등록된 원문 또는 객체 선택자가 일치하지 않습니다.')
+    origins={(s.get('partition_offset'),s.get('inode'),s.get('path'),s.get('source_offset',0),s.get('locator_basis')) for s in candidates}
+    if len(origins)>1:raise ValueError('같은 보존 바이트의 원본이 여러 개입니다. 파티션·inode·source_offset을 지정하세요.')
+    source=candidates[0]
+    path=(run/relative).resolve()
+    if not path.is_relative_to(run.resolve()):raise ValueError('보존 원문 경로 범위 오류')
+    with path.open('rb') as stream:
+        if hashlib.file_digest(stream,'sha256').hexdigest()!=source['sha256']:raise ValueError('보존 원문 해시 불일치')
+        stream.seek(0,2);size=stream.tell()
+        if request.byte_offset>size:raise ValueError('보존 원문 크기를 벗어난 읽기 위치')
+        stream.seek(request.byte_offset);data=stream.read(request.byte_length)
+    end=request.byte_offset+len(data)
+    fields={k:source.get(k) for k in ('path','partition_offset','inode','locator_basis')}
+    fields.update(artifact_path=f'{run.name}/{relative}',source_sha256=source['sha256'],
+        source_complete=source['complete'],byte_offset=request.byte_offset,byte_length=len(data),
+        image_file_byte_offset=source.get('source_offset',0)+request.byte_offset,source_offset=source.get('source_offset',0),
+        excerpt=data.decode(errors='replace'),next_byte_offset=end if end<size else None,
+        hash_scope='full retained artifact, not necessarily full original file',
+        stage='보존 원문 지정 구간',interpretation_limit='좌표 기준을 유지한 읽기. 압축 해제 좌표는 압축 파일 바이트 위치가 아님')
+    return {'tool':'read_source','observations':[{'type':'linux_tool_result','timestamp':None,
+        'source_location':f'{image.name}:{source["path"]}:retained:{relative}:offset:{request.byte_offset}','fields':fields}],
+        'complete':request.byte_offset==0 and end==size and source['complete'],
+        'status':'covered' if request.byte_offset==0 and end==size and source['complete'] else 'partial'}
+
+
+def search(run, image, manifest, request):
+    query = request.query.casefold().strip()
+    if len(query) < 2:raise ValueError('검색어는 2글자 이상이어야 합니다.')
+    lower, upper = time_value(request.time_from), time_value(request.time_to)
+    if lower and upper and lower > upper:raise ValueError('검색 시간 범위가 역순입니다.')
+    files = [(run/'events.ndjson', None), (run/'filesystem_inventory.ndjson', None)]
+    for source in manifest['sources']:
+        if not source.get('relative_path'):continue
+        path = (run/source['relative_path']).resolve()
+        if not path.is_relative_to(run.resolve()):raise ValueError('원문 경로 범위 오류')
+        files.append((path, source))
+    binding = hashlib.sha256(json.dumps(['retained-search-5',run.name, manifest, fingerprint_scope({**request.model_dump(), 'cursor':''}),
+        [(p.name,p.stat().st_size,p.stat().st_mtime_ns) for p,_ in files]], sort_keys=True).encode()).hexdigest()
+    fi=offset=line_number=watermark=0
+    if request.cursor:
+        try:
+            c=json.loads(base64.urlsafe_b64decode(request.cursor.encode()))
+            if c['binding'] != binding:raise ValueError('검색 범위 또는 원문이 변경되었습니다.')
+            fi,offset,line_number=c['file'],c['offset'],c['line']
+            watermark=c.get('watermark',0)
+            if any(type(v) is not int or v < 0 for v in (fi,offset,line_number)) or fi >= len(files) or offset > files[fi][0].stat().st_size:raise ValueError('잘못된 검색 위치')
+            if type(watermark) is not int or watermark<0 or watermark>files[fi][0].stat().st_size:raise ValueError('잘못된 검색 범위')
+        except (KeyError,TypeError,ValueError) as ex:raise ValueError('유효하지 않은 검색 이어보기: '+str(ex)) from ex
+    observations=[]; examined=0; unknown_time=0; matched=0; clipped=0; raw_files=0
+    def continuation():
+        return base64.urlsafe_b64encode(json.dumps({'binding':binding,'file':fi,'offset':offset,'line':line_number,'watermark':watermark}).encode()).decode()
+    next_cursor=''
+    while fi < len(files):
+        path,source=files[fi]
+        if request.source_offset is not None and (source is None or source.get('source_offset',0)!=request.source_offset):
+            fi+=1;offset=line_number=watermark=0;continue
+        if source:
+            # Verify before admitting ANY excerpts from this source.
+            with path.open('rb') as stream:
+                digest=hashlib.file_digest(stream,'sha256').hexdigest()
+            if digest != source['sha256']:raise ValueError('검색 원문 해시 불일치')
+            raw_files+=1
+        with path.open('rb') as stream:
+            stream.seek(offset)
+            while True:
+                before=stream.tell();raw=stream.readline(LINE_LIMIT)
+                if not raw:break
+                if examined and examined+len(raw)>SCAN_BUDGET:
+                    next_cursor=continuation();break
+                examined+=len(raw)
+                text=raw.decode(errors='replace')
+                fragment=not raw.endswith(b'\n') and len(raw)==LINE_LIMIT
+                if fragment:clipped+=1
+                item=None
+                hit,evaluated_end=literal_byte_hit(raw,query,max(0,watermark-before),final=not fragment,with_boundary=True) if source else (-1,len(raw))
+                if hit>=0 if source else query in text.casefold():
+                    if source:
+                        window_start=max(0,hit-1500)
+                        window=raw[window_start:window_start+6000]
+                        item={'type':'linux_literal_match','timestamp':None,
+                            'source_location':f"{image.name}:byte:{source['partition_offset']}:{source['path']}:inode:{source['inode']}:offset:{source.get('source_offset',0)+before+window_start}",
+                            'fields':{**{k:source.get(k) for k in ('path','partition_offset','inode')},
+                                'line':line_number+1,'byte_offset':before+window_start,'image_file_byte_offset':source.get('source_offset',0)+before+window_start,
+                                'locator_basis':source.get('locator_basis','retained original file bytes'),
+                                'byte_length':len(window),'excerpt':window.decode(errors='replace'), 'excerpt_truncated':len(raw)>len(window),
+                                'artifact_path':f"{run.name}/{source['relative_path']}",'source_sha256':source['sha256'],
+                                'source_complete':source['complete'],'search_query':request.query,
+                                'stage':'보존 원문 문자열 일치','interpretation_limit':'문자열 존재와 실행·성공·악성 의도는 별도'}}
+                    else:
+                        if len(raw)==LINE_LIMIT and not raw.endswith(b'\n'):raise ValueError('색인 행 한도 초과: 파서 입력을 분할해야 합니다.')
+                        item=json.loads(text)
+                        if 'fields' not in item:item={'type':'linux_path_match','timestamp':None,'source_location':f"{image.name}:byte:{item['partition_offset']}:{item['path']}:inode:{item['inode']}",'fields':item}
+                    f=item['fields'];p=f.get('path','')
+                    if request.partition_offset is not None and f.get('partition_offset')!=request.partition_offset:item=None
+                    if request.inode is not None and f.get('inode')!=request.inode:item=None
+                    if request.path:
+                        if manifest.get('platform')=='windows':
+                            from .evidence_semantics import windows_path
+                            candidate,prefix=windows_path(p),windows_path(request.path).rstrip('\\')
+                            if not (candidate==prefix or candidate.startswith(prefix+'\\')):item=None
+                        elif not (p==request.path or p.startswith(request.path.rstrip('/')+'/')):item=None
+                    if item and request.account and not re.search(r'(?<![\w.-])'+re.escape(request.account)+r'(?![\w.-])',text):item=None
+                    if item and (lower or upper):
+                        try:t=time_value(item.get('timestamp'))
+                        except (ValueError,TypeError):t=None
+                        if t is None:unknown_time+=1;item=None
+                        elif (lower and t<lower) or (upper and t>upper):item=None
+                if item:
+                    matched+=1
+                    if len(observations)>=request.limit:
+                        next_cursor=continuation();break
+                    item['fields']['source_origin']=source_origin(item)
+                    observations.append(item)
+                watermark=max(watermark,before+evaluated_end)
+                if fragment and source:
+                    # A UTF-8 character uses at most four bytes. Overlap retains
+                    # all possible boundary-spanning literal matches.
+                    stream.seek(max(before+1,stream.tell()-max(4,len(query.encode('utf-8'))*4)))
+                else:line_number+=1
+                offset=stream.tell()
+            if next_cursor:break
+        fi+=1;offset=line_number=watermark=0
+    complete=not next_cursor and not clipped
+    has_more=bool(next_cursor)
+    remaining_matches_unknown=bool(next_cursor or clipped)
+    # Give callers an exact, copyable continuation request.  In particular,
+    # preserve the page limit that is part of the cursor binding; a fresh
+    # default limit would otherwise invalidate the cursor or change paging
+    # semantics.  The cursor remains the authoritative position and all
+    # evidence/time/path/account selectors are carried forward verbatim.
+    continuation_request = None
+    if next_cursor:
+        continuation_request = request.model_dump()
+        continuation_request['cursor'] = next_cursor
+    return {'tool':'search','query':request.query,'path':request.path,'observations':observations,
+        'matches':matched,'matches_scope':'this page scan only; not total matches', 'returned':len(observations),
+        'omitted_matches':max(0,matched-len(observations)), 'next_cursor':next_cursor,
+        'continuation_request': continuation_request,
+        'continuation_request_semantics': ('Copy continuation_request verbatim for the next page; do not replace '
+                                           'its cursor or limit with fresh defaults. It preserves the exact search '
+                                           'filters and evidence binding.')
+        if next_cursor else None,
+        'has_more':has_more,
+        'remaining_matches_unknown':remaining_matches_unknown,
+        'omission_count_basis':('at least omitted_matches; total remaining matches unknown'
+                                if remaining_matches_unknown else 'exact within the fully scanned scope'),
+        'complete':complete,'truncated':not complete,'status':'partial' if not complete else 'covered' if observations else 'covered_zero',
+        'raw_files':raw_files,'raw_bytes':examined,'unknown_time_excluded':unknown_time,'long_line_fragments':clipped,
+        'query_semantics':'case-insensitive literal substring; spaces are literal, no AND/OR/regex',
+        'scope':'This page of retained sources only; cursor continues exact same filters. Time filters exclude undated raw lines. Account is a literal token, not verified identity.',
+        'observation_preconditions':{'logging_enabled':'unknown','retention_continuity':'unknown','absence_can_refute_behavior':False},
+        'negative_search':None if observations else '이 검색 페이지에서 일치 없음. 이미지 전체 또는 이전 페이지의 부재 아님'}

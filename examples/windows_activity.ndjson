@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-01T00:00:00+00:00","fields":{"channel":"Security","event_id":4688,"event_record_id":1,"NewProcessName":"C:\\Lab\\synthetic-fixture.exe","os_instance":"SYNTHETIC-WINDOWS","message":"Synthetic test record, not real incident evidence"}}
+{"timestamp":"2026-09-01T00:00:01+00:00","fields":{"channel":"Windows PowerShell","event_id":400,"event_record_id":2,"execution_process_id":1234,"path":"C:\\Lab\\synthetic-fixture.exe","os_instance":"SYNTHETIC-WINDOWS","message":"Synthetic engine-start record; command completion not established"}}

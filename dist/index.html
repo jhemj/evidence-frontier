@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="description" content="증거에서 시작하는 로컬 AI 포렌식 조사" />
+    <title>Frontier · 로컬 포렌식 워크벤치</title>
+    <link rel="stylesheet" href="/style.css?v=20260928-cockpit" />
+    <link rel="stylesheet" href="/timeline.css?v=20260914-timeline-2" />
+    <script src="/timeline.js?v=20260914-timeline-2" defer></script>
+    <script src="/app.js?v=20260928-cockpit" defer></script>
+    <link rel="stylesheet" href="/progress.css?v=20260928" />
+    <link rel="stylesheet" href="/activity.css?v=20260928-1" />
+    <link rel="stylesheet" href="/cockpit.css?v=20260928" />
+    <script src="/progress.js?v=20260928" defer></script>
+    <script src="/activity.js?v=20260928-1" defer></script>
+    <script src="/cockpit.js?v=20260928" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Frontier 홈"
+          ><span class="brand-mark">f</span>frontier<span class="local-tag"
+            >LOCAL</span
+          ></a
+        ><button class="new-case" id="new-case"><span>＋</span> 새 사건</button>
+        <p class="eyebrow">내 조사</p>
+        <div id="cases" class="case-list"></div>
+        <div class="sidebar-bottom">
+          <div class="privacy">
+            <span class="lock-icon">▣</span>
+            <div>증거는 이곳에<small>로컬 저장 · 로컬 분석</small></div>
+          </div>
+          <button class="settings-button" id="settings">
+            <span>⚙</span> AI 연결 설정<span
+              id="model-status"
+              class="connection"
+              >설정 필요</span
+            >
+          </button>
+        </div>
+      </aside>
+      <main>
+        <header>
+          <div>
+            <span class="breadcrumb">워크스페이스</span
+            ><span class="slash">/</span
+            ><span id="case-title">새로운 조사</span>
+          </div>
+          <span class="version">INVESTIGATION WORKSPACE</span>
+        </header>
+        <div id="welcome" class="welcome">
+          <div class="intro-symbol">f</div>
+          <span class="eyebrow">EVIDENCE FIRST</span>
+          <h1>다음 단서를 찾다.</h1>
+          <p>증거를 연결하세요. 조사는 에이전트가 이어갑니다.</p>
+          <button class="primary large" id="welcome-create">
+            새 사건 만들기 <span>＋</span></button
+          ><button class="text-button" id="example-case">
+            예제 증거로 흐름 살펴보기 <span>↗</span>
+          </button>
+          <div class="welcome-steps">
+            <div><span>01</span>증거 연결</div>
+            <i></i>
+            <div><span>02</span>자동 침해조사</div>
+            <i></i>
+            <div><span>03</span>근거와 보고서</div>
+          </div>
+        </div>
+        <section id="workspace" hidden>
+          <div class="case-heading">
+            <div>
+              <span class="eyebrow" id="case-id"></span>
+              <h1 id="case-name"></h1>
+              <p id="case-question"></p>
+            </div>
+            <div class="case-actions">
+              <button class="secondary" data-tab="evidence">증거 관리 <span id="evidence-count" class="count">0</span></button>
+              <span class="status" id="case-status"></span
+              ><button id="run" class="primary">
+                침해조사 시작 <span>▶</span>
+              </button>
+            </div>
+          </div>
+          <div id="panel-investigate" class="panel investigation">
+            <section id="investigation-progress" class="investigation-progress" aria-label="조사 진행 현황"></section>
+            <div class="investigation-desk">
+              <section class="clue-board" aria-labelledby="clue-heading">
+                <div class="board-heading"><div><span class="section-number">02 / TIMELINE</span><h2 id="clue-heading">타임라인</h2></div><span id="clue-count" class="subtle">검토 대기</span></div>
+                <div class="clue-toolbar"><div class="clue-filters" aria-label="단서 필터"><button data-clue-filter="all" aria-pressed="true">전체</button><button data-clue-filter="확정" aria-pressed="false"><i class="level-dot confirmed"></i>확정</button><button data-clue-filter="유력" aria-pressed="false"><i class="level-dot probable"></i>유력</button><button data-clue-filter="추정" aria-pressed="false"><i class="level-dot tentative"></i>추정</button></div><button id="clue-help" class="icon-button" aria-label="판단 등급과 관련성 안내" title="판단 등급과 관련성 안내">?</button></div>
+                <p id="clue-help-text" class="inline-help" hidden>확정은 카드에 적힌 사실의 확인이며 침해 확정이 아닙니다. 추정은 미확인·검토 전 단서입니다. 관련성 점수는 조사 연결도이며 침해 확률이 아닙니다.</p>
+                <div id="triage-console" aria-live="polite"></div>
+                <button id="clue-more" class="secondary" hidden>다음 단서 보기</button>
+                <details id="pending-clues" class="quiet-clues" hidden><summary>검토 대기·보류 <span id="pending-count">0</span></summary><div id="pending-clue-list"></div><button id="pending-more" class="secondary" hidden>다음 대기 항목 보기</button></details>
+                <details id="quiet-clues" class="quiet-clues"><summary>낮은 관련성 <span id="quiet-count">0</span></summary><div id="quiet-clue-list"></div></details>
+                <div class="hypothesis-heading"><h3>검증 중인 가설</h3><span id="hypothesis-count" class="subtle"></span></div>
+                <div id="active-hypotheses" class="active-hypotheses"></div>
+              </section>
+              <aside class="companion" aria-label="조사 대화와 보고서">
+                <div class="companion-heading"><span class="section-number">03 / WORK WITH AGENT</span><span id="companion-state" class="subtle">Frontier</span></div>
+                <nav class="companion-tabs" aria-label="에이전트 패널"><button class="active" data-companion="chat" aria-pressed="true">대화</button><button data-companion="report" aria-pressed="false">현재 보고서 <span class="report-dot"></span></button></nav>
+                <section class="conversation" id="companion-chat">
+              <div class="conversation-heading" hidden>
+                <h2>에이전트와 대화</h2>
+              </div>
+              <button id="live-report" class="live-report" data-companion="report" aria-label="현재 보고서 열기"></button>
+              <div id="investigation-summary" class="investigation-summary" hidden></div>
+              <div id="judgment-results" hidden></div>
+              <div id="messages" class="messages"></div>
+              <div id="suggestions" class="suggestions">
+                <button
+                  data-question="확인된 관측과 아직 조사하지 못한 영역을 정리해줘"
+                >
+                  핵심만 정리해줘</button
+                ><button
+                  data-question="확인된 활동을 설명할 수 있는 정상적인 대안과 추가 검사를 제안해줘"
+                >
+                  다른 가능성은?
+                </button>
+              </div>
+              <form id="chat-form" class="composer">
+                <label class="sr-only" for="message">조사 질문</label
+                ><textarea
+                  id="message"
+                  rows="2"
+                  placeholder="궁금한 점이나 조사 방향을 알려주세요"
+                  maxlength="4000"
+                  required
+                ></textarea>
+                <div>
+                  <span>Enter 전송 · Shift+Enter 줄바꿈</span
+                  ><button type="submit" id="send" aria-label="질문 보내기">
+                    ↑
+                  </button>
+                </div>
+              </form>
+              <p id="ai-progress" class="small-hint" role="status" hidden>
+                근거를 확인하고 있습니다…
+              </p>
+            </section>
+                <div id="report-dock"></div>
+              </aside>
+            </div>
+          </div>
+          <dialog id="work-history" class="work-history-dialog" aria-labelledby="work-history-heading">
+            <div class="dialog-heading"><div><h2 id="work-history-heading">전체 작업</h2><span id="work-history-count" class="subtle"></span></div><button class="close" data-close="work-history" aria-label="전체 작업 닫기">×</button></div>
+            <div class="work-history-filters"><label>상태<select id="work-status-filter"><option value="">전체 상태</option><option value="running">수행 중</option><option value="waiting">응답 대기</option><option value="done">완료</option><option value="partial">범위 제한</option><option value="failed">실패</option><option value="paused">일시정지</option><option value="interrupted">중단됨</option></select></label><label>종류<select id="work-kind-filter"><option value="">전체 종류</option><option value="collection">자료 수집</option><option value="tool">추가 검사</option><option value="model">AI 분석</option><option value="report">보고서</option></select></label><button id="work-history-refresh" class="secondary">새로고침 ↻</button></div>
+            <p id="work-history-error" role="alert"></p><p id="work-history-loading" role="status" hidden>불러오는 중…</p>
+            <ol id="work-history-list" aria-label="실제 작업 이력, 최신순"></ol><p id="work-history-empty" class="work-empty" hidden>조건에 맞는 작업이 없습니다.</p><button id="work-history-more" class="secondary" hidden>이전 작업 더보기</button>
+          </dialog>
+          <dialog id="evidence-drawer" class="evidence-drawer">
+            <div class="dialog-heading"><h2>증거와 조사 기록</h2><button class="close" data-close="evidence-drawer" aria-label="증거와 조사 기록 닫기">×</button></div>
+            <aside class="context">
+              <section class="context-card">
+                <div class="section-heading">
+                  <h2>연결한 증거</h2>
+                  <button
+                    id="add-evidence"
+                    class="icon-button"
+                    aria-label="증거 추가"
+                  >
+                    ＋
+                  </button>
+                </div>
+                <div id="evidence-files"></div>
+                <p class="small-hint">원본을 수정하지 않고 읽습니다.</p>
+              </section>
+              <section class="context-card">
+                <div class="section-heading">
+                  <h2>조사 진행</h2>
+                  <span id="coverage-label"></span>
+                </div>
+                <progress id="coverage-progress" value="0" max="100"></progress>
+                <div id="steps" class="steps"></div>
+                <details class="details">
+                  <summary>상세 작업과 미확인 영역</summary>
+                  <div id="tasks"></div>
+                </details>
+              </section>
+            </aside>
+          <details class="drawer-timeline"><summary>전체 타임라인</summary><section id="visual-timeline" class="visual-timeline" aria-label="증거 타임라인"></section></details>
+          <div id="panel-evidence" class="panel">
+            <div class="section-heading">
+              <div>
+                <h2>원문 근거</h2>
+                <p class="subtle">
+                  원본 위치와 도구 실행 기록을 함께 보관합니다.
+                </p>
+              </div>
+              <form id="search-form" class="search">
+                <input
+                  id="search"
+                  aria-label="근거 검색"
+                  placeholder="경로, 사용자, 이벤트 검색"
+                /><button type="submit" aria-label="검색">⌕</button>
+              </form>
+            </div>
+            <div id="observation-list" class="observation-list"></div>
+            <details class="hypothesis-panel"><summary>기본 조사 영역과 반대 설명</summary><div id="hypotheses"></div></details>
+            <button id="more-observations" class="secondary" hidden>
+              다음 100건
+            </button>
+            <div class="section-heading claims-heading">
+              <h2>조사 중 수집한 해석</h2>
+              <span class="subtle">최종 판단은 조사 화면에서 확인하세요</span>
+            </div>
+            <div id="claims"></div>
+          </div>
+          </dialog>
+          <div id="panel-report" class="panel" hidden>
+            <div class="section-heading">
+              <div>
+                <h2>현재까지의 정리</h2>
+              </div>
+              <button class="primary" id="save-report">저장 · Word ↓</button>
+            </div>
+            <div class="report-history">
+              <button id="reader-executive" aria-pressed="true">임원용 요약</button>
+              <button id="reader-analyst" aria-pressed="false">분석가용 상세</button>
+              <button id="report-live">실시간</button>
+            </div>
+            <p id="report-snapshot-status" class="subtle"></p>
+            <details class="saved-reports"><summary>저장 이력 · 내보내기</summary><div id="report-history" class="report-history"></div><button id="download-word" class="secondary">Word ↓</button><button id="download-raw" class="secondary">원문 패키지 ↓ · 제한 배포</button><p class="small-hint">배포용은 민감값을 가립니다. 원문 패키지는 제한 배포하세요.</p></details>
+            <iframe
+              title="조사 보고서 미리보기"
+              id="report-preview"
+              sandbox="allow-same-origin"
+            ></iframe>
+          </div>
+        </section>
+      </main>
+    </div>
+    <dialog id="case-dialog">
+      <form id="case-form">
+        <div class="dialog-heading">
+          <h2>새 사건 만들기</h2>
+          <button
+            type="button"
+            class="close"
+            data-close="case-dialog"
+            aria-label="닫기"
+          >
+            ×
+          </button>
+        </div>
+        <label for="name">사건 이름</label
+        ><input
+          id="name"
+          placeholder="예: 업무 단말 실행 흔적 조사"
+          maxlength="120"
+          required
+        /><label for="question"
+          >확인하고 싶은 내용 <span class="subtle">선택</span></label
+        ><textarea
+          id="question"
+          rows="3"
+          maxlength="4000"
+          placeholder="조사 목적을 짧게 적어주세요"
+        ></textarea
+        ><label for="target-os">증거의 운영체제</label
+        ><select id="target-os">
+          <option value="linux">Linux</option>
+          <option value="windows">Windows</option>
+        </select>
+        <p class="small-hint">이 PC가 아닌 조사 대상의 OS를 선택하세요. 기존 사건의 OS는 변경하지 않습니다.</p>
+        <label for="profile">조사 범위</label
+        ><select id="profile">
+          <option value="standard">
+            표준 조사 · 무결성, 구조, 관측, 타임라인, 교차 확인
+          </option>
+          <option value="triage">빠른 확인 · 무결성, 구조, 관측</option>
+        </select>
+        <p class="small-hint">
+          지원하지 않거나 조사하지 못한 영역은 미확인으로 표시합니다.
+        </p>
+        <button class="primary full" type="submit">사건 만들기</button>
+      </form>
+    </dialog>
+    <dialog id="evidence-dialog">
+      <div class="dialog-heading">
+        <h2>증거 연결</h2>
+        <button class="close" data-close="evidence-dialog" aria-label="닫기">
+          ×
+        </button>
+      </div>
+      <p class="subtle">
+        전용 증거 폴더에서 분석할 파일을 선택하세요. E01 분할 이미지는 첫 번째
+        .E01 파일을 선택합니다.
+      </p>
+      <div id="available-files" class="available-files"></div>
+    </dialog>
+    <dialog id="settings-dialog">
+      <form id="settings-form">
+        <div class="dialog-heading">
+          <h2>로컬 AI 연결</h2>
+          <button
+            type="button"
+            class="close"
+            data-close="settings-dialog"
+            aria-label="닫기"
+          >
+            ×
+          </button>
+        </div>
+        <p class="subtle">이 컴퓨터 또는 신뢰한 사설망의 모델을 연결하세요.</p>
+        <label for="protocol">연결 방식</label
+        ><select id="protocol">
+          <option value="ollama">Ollama</option>
+          <option value="openai_compatible">
+            OpenAI 호환 서버 (vLLM 등)
+          </option></select
+        ><label for="base-url">모델 서버 주소</label
+        ><input
+          id="base-url"
+          type="url"
+          required
+          placeholder="http://host.docker.internal:11434"
+        /><label class="check-label"
+          ><input id="trusted-lan" type="checkbox" />이 사설망 서버로 사건의
+          근거를 전송하는 데 동의합니다.</label
+        ><button type="button" class="secondary" id="probe">
+          연결 및 모델 확인
+        </button>
+        <p id="probe-result" role="status" class="small-hint"></p>
+        <label for="model">분석 모델</label
+        ><input
+          id="model"
+          list="model-list"
+          placeholder="서버에 설치된 모델 이름"
+        /><datalist id="model-list"></datalist
+        ><label for="falsifier-model"
+          >반증 검토 모델 <span class="subtle">선택</span></label
+        ><input
+          id="falsifier-model"
+          list="model-list"
+          placeholder="비워두면 분석 모델을 별도 문맥으로 사용"
+        />
+        <p class="small-hint">
+          모델 검토는 독립 포렌식 도구 검증을 대신하지 않습니다.
+        </p>
+        <details>
+          <summary>조사 방식·모델 상세 설정</summary>
+          <p class="small-hint">현재 조사자: Frontier Native. 외부 에이전트 실행 권한은 부여하지 않습니다. 설정 변경은 새 사건부터 사용하세요.</p>
+          <label for="investigation-strategy">조사 전략</label>
+          <select id="investigation-strategy">
+            <option value="guided">가설·미검사 근거 중심 + 조사 절차</option>
+            <option value="baseline">기존 근거 순서 · 비교 실험용</option>
+          </select>
+          <label for="think-mode">Ollama 추론 모드</label>
+          <select id="think-mode">
+            <option value="off">끄기 · 기존 설정</option>
+            <option value="on">켜기 · 모델 지원 확인 필요</option>
+            <option value="auto">모델 기본값 · 실제 추론량은 모델에 따름</option>
+            <option value="low">낮음 · 해당 단계를 지원하는 모델만</option>
+            <option value="medium">중간 · 해당 단계를 지원하는 모델만</option>
+            <option value="high">높음 · 해당 단계를 지원하는 모델만</option>
+            <option value="xhigh">매우 높음 · 해당 단계를 지원하는 모델만</option>
+          </select>
+          <p class="small-hint">추론을 켜면 시간과 출력 토큰 사용량이 늘 수 있습니다. 문맥 크기는 모델 서버의 실제 지원 범위 안에서 설정하세요. 모델의 내부 추론문은 저장하지 않습니다.</p>
+          <label for="investigation-context">조사·최종 판단 문맥 한도 (토큰)</label>
+          <input id="investigation-context" type="number" min="4096" max="131072" step="1" required />
+          <label for="investigation-output">조사·최종 판단 출력 한도 (토큰)</label>
+          <input id="investigation-output" type="number" min="256" max="32768" step="1" required />
+          <label for="assistant-context">질문·경쟁 설명 문맥 한도 (토큰)</label>
+          <input id="assistant-context" type="number" min="4096" max="131072" step="1" required />
+          <label for="assistant-output">질문·경쟁 설명 출력 한도 (토큰)</label>
+          <input id="assistant-output" type="number" min="256" max="32768" step="1" required />
+          <label for="model-temperature">응답 변동성 (0~1)</label>
+          <input id="model-temperature" type="number" min="0" max="1" step="0.01" required />
+          <p class="small-hint">출력 한도는 문맥 한도보다 작아야 합니다. OpenAI 호환 연결의 문맥 크기는 서버가 관리하며, 여기서는 추론 모드 조절을 지원하지 않습니다.</p>
+        </details>
+        <button type="submit" class="primary full">연결 설정 저장</button>
+      </form>
+    </dialog>
+    <dialog id="auth-dialog">
+      <form id="auth-form">
+        <h2>워크벤치 접속</h2>
+        <label for="access-token">접속 암호</label
+        ><input id="access-token" type="password" required /><button
+          class="primary full"
+        >
+          접속
+        </button>
+      </form>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+  </body>
+</html>
