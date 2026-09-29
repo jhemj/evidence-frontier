@@ -6,7 +6,7 @@ from fastapi.responses import Response
 from .provider import validate_url
 
 app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
-ALLOWED={('GET','api/tags'),('GET','models'),('POST','api/chat'),('POST','chat/completions')}
+ALLOWED={('GET','api/tags'),('GET','models'),('POST','api/show'),('POST','api/chat'),('POST','chat/completions')}
 MAX_BODY=1024*1024
 
 

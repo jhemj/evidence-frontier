@@ -25,14 +25,15 @@ def located(root, relative):
 
 def prepare(document, destination):
     root = Path(os.getenv('ANALYSIS_ROOT', '/analysis'))
-    run_ids = {o['fields']['run_id'] for o in document['observations'] if o['type'] == 'linux_environment'}
+    environments = [o for o in document['observations'] if o['type'] in ('linux_environment','windows_environment')]
+    run_ids = {o['fields']['run_id'] for o in environments}
     if not run_ids: return {}, {}, {}
     files = {}; ledger = []; object_ids = {}; generated = {}; pinned_hashes={}
     bases={(o['fields'].get('artifact_path'),o['fields'].get('path')):o['fields']['locator_basis']
            for o in document['observations'] if o['fields'].get('locator_basis')}
     for run_id in sorted(run_ids):
         manifest_path = located(root, run_id + '/manifest.json')
-        reference = next(o['fields']['source_sha256'] for o in document['observations'] if o['type'] == 'linux_environment' and o['fields']['run_id'] == run_id)
+        reference = next(o['fields']['source_sha256'] for o in environments if o['fields']['run_id'] == run_id)
         if digest_file(manifest_path) != reference: raise ValueError('분석 원장 해시가 변경되었습니다.')
         pinned_hashes['evidence/'+run_id+'/manifest.json']=reference
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
@@ -63,6 +64,9 @@ def prepare(document, destination):
             ledger.append({'evidence_id': ev_id, 'relative_path': 'evidence/' + relative, 'sha256': source['sha256'],
                            'image': manifest['image'], 'partition': source['partition_offset'], 'server_path': source['path'],
                            'locator': f"inode:{source['inode']}:offset:{source.get('source_offset',0)}:{source.get('locator_basis') or bases.get((relative,source['path']),'original file bytes')}", 'complete': source['complete'], 'status': source['status'],
+                           'hash_scope':source.get('hash_scope','retained artifact'),
+                           'original_source_sha256':source.get('original_source_sha256'),
+                           'os_instance':source.get('os_instance'),
                            'limitation': source.get('reason', '')})
         for name in ('filesystem_inventory.ndjson', 'events.ndjson'):
             if digest_file(root / run_id / name) != expected[name]: raise ValueError('행위 기록/인벤토리 해시 불일치')
@@ -82,20 +86,25 @@ def prepare(document, destination):
     def csv_bytes(rows, columns):
         stream = io.StringIO(newline=''); writer = csv.DictWriter(stream, fieldnames=columns, extrasaction='ignore')
         writer.writeheader(); writer.writerows(rows); return stream.getvalue().encode('utf-8-sig')
-    generated['EVIDENCE_MANIFEST.csv'] = csv_bytes(ledger, ['evidence_id', 'relative_path', 'sha256', 'image', 'partition', 'server_path', 'locator', 'complete', 'status', 'limitation'])
+    generated['EVIDENCE_MANIFEST.csv'] = csv_bytes(ledger, ['evidence_id', 'relative_path', 'sha256', 'hash_scope', 'original_source_sha256', 'os_instance', 'image', 'partition', 'server_path', 'locator', 'complete', 'status', 'limitation'])
     mapping = []
     for o in document['observations']:
         f = o['fields']; relative = f.get('artifact_path')
         if relative in object_ids:
             mapping.append({'observation_id': o['id'], 'evidence_id': object_ids[relative], 'locator': o['source_location'],
+                            'image_evidence_id':o['evidence_id'],'path':f.get('path'),'partition_offset':f.get('partition_offset'),
+                            'inode':f.get('inode'),'locator_basis':f.get('locator_basis'),'receipt_id':o.get('receipt_id'),
                             'line': f.get('line'), 'byte_offset': f.get('byte_offset'), 'sha256': f.get('source_sha256')})
-    generated['REPORT_EVIDENCE_MAP.csv'] = csv_bytes(mapping, ['observation_id', 'evidence_id', 'locator', 'line', 'byte_offset', 'sha256'])
+    generated['REPORT_EVIDENCE_MAP.csv'] = csv_bytes(mapping, ['observation_id', 'evidence_id','image_evidence_id', 'locator','path','partition_offset','inode','locator_basis', 'line', 'byte_offset', 'sha256','receipt_id'])
     timeline = destination / 'TIMELINE.csv'
+    from .disk_budget import require_space
+    # Timeline plus SQLite staging can exceed the source line stream size.
+    require_space([(destination,8*sum((root/run_id/'events.ndjson').stat().st_size for run_id in run_ids)+1024*1024)])
     sort_path = destination / 'timeline-sort.sqlite3'
     sort_db = sqlite3.connect(sort_path)
     sort_db.execute('CREATE TABLE timeline (timestamp TEXT, row TEXT)')
     with timeline.open('w', newline='', encoding='utf-8-sig') as out:
-        writer = csv.writer(out); writer.writerow(['timestamp_kst', 'source_timestamp', 'event', 'stage', 'evidence_id', 'server_path', 'line', 'byte_offset', 'time_basis', 'interpretation_limit'])
+        writer = csv.writer(out); writer.writerow(['timestamp_kst', 'source_timestamp', 'event', 'stage', 'evidence_id', 'server_path', 'line', 'byte_offset', 'time_basis', 'interpretation_limit','time_kind','epoch_nanoseconds'])
         # Sort on disk so full timelines remain chronological without an in-memory cap.
         for run_id in sorted(run_ids):
             with (root / run_id / 'events.ndjson').open(encoding='utf-8') as stream:
@@ -104,9 +113,16 @@ def prepare(document, destination):
                     if not timestamp: continue
                     f = event['fields']; evidence_id = object_ids.get(f.get('artifact_path'))
                     if not evidence_id: raise ValueError('타임라인 원문 증거 연결 누락')
-                    converted = datetime.fromisoformat(timestamp).astimezone(timezone(timedelta(hours=9))).isoformat()
-                    row = [converted, timestamp, event['type'], f.get('stage'), evidence_id, f.get('path'), f.get('line'), f.get('byte_offset'), f.get('time_basis'), f.get('interpretation_limit')]
-                    sort_db.execute('INSERT INTO timeline VALUES (?,?)', (converted, json.dumps(row, ensure_ascii=False)))
+                    parsed=datetime.fromisoformat(timestamp)
+                    converted=parsed.astimezone(timezone(timedelta(hours=9))).isoformat() if parsed.tzinfo else ''
+                    from .evidence_semantics import observation_time
+                    time_info=observation_time(event)
+                    row = [converted, timestamp, event['type'], f.get('stage'), evidence_id, f.get('path'), f.get('line'), f.get('byte_offset'), f.get('time_basis'), f.get('interpretation_limit'),time_info['time_kind'],time_info['epoch_nanoseconds']]
+                    # Shift integer epoch to a fixed-width positive key; no float
+                    # or SQLite 64-bit overflow for historical nanosecond values.
+                    exact=time_info['epoch_nanoseconds']
+                    sort_key=f'{int(exact)+10**22:023d}' if exact is not None else 'z'+(converted or timestamp)
+                    sort_db.execute('INSERT INTO timeline VALUES (?,?)', (sort_key, json.dumps(row, ensure_ascii=False)))
         sort_db.commit()
         for row in sort_db.execute('SELECT row FROM timeline ORDER BY timestamp,rowid'): writer.writerow(json.loads(row[0]))
     sort_db.close(); sort_path.unlink()
@@ -120,8 +136,18 @@ def prepare(document, destination):
                          'judgment': '미확인', 'limitation': '관찰된 지표 후보. 악성 IOC·목적 달성을 확정하지 않음'})
     generated['IOC_LIST.csv'] = csv_bytes(iocs, ['type', 'value', 'port', 'scope', 'source', 'stage', 'inspection_context', 'judgment', 'observation_id', 'evidence_id', 'limitation'])
     generated['HYPOTHESES.json'] = json.dumps(document['hypotheses'], ensure_ascii=False, indent=2).encode()
+    for name,key in (('FINAL_SYNTHESIS.json','case_synthesis'),('CHECK_LEDGER.json','check_ledger'),
+                     ('INVESTIGATION_FRONTIER.json','investigation_frontier'),('SYNTHESIS_GATE.json','synthesis_gate'),
+                     ('SESSION_LINKS.json','session_links'),('COVERAGE_DENOMINATORS.json','completion'),
+                     ('REQUIRED_MATERIALS.json','required_materials'),('REVIEW_FAILURES.json','review_failures'),
+                     ('OBJECTIONS.json','objections'),('CASE_QUESTIONS.json','case_questions'),
+                     ('TEST_INTENTS.json','test_intents'),('TEST_RESULT_USES.json','test_result_uses')):
+        generated[name]=json.dumps(document.get(key,[]),ensure_ascii=False,indent=2).encode()
     generated['CASE_MEMORY.md'] = ('# ' + document['case']['name'] + '\n\n자동 침해조사 결과. 미확인 범위와 AI 검토 후보를 포함합니다.\n\n' +
         '\n\n'.join(f"## {h['text']}\n{h.get('judgment', '미확인')} (AI 후보)\n{h.get('reasoning', h.get('uncertainty', ''))}" for h in document['hypotheses'])).encode()
+    if document.get('case_synthesis'):
+        generated['CASE_MEMORY.md']=('# '+document['case']['name']+'\n\n'+document['completion']['label']+'\n\n'+
+            '\n\n'.join(f"## {s['number']}. {s['question']}\n{s['finding']['judgment']} · {s['status']}\n{s['finding']['reason']}\n근거: {', '.join(s['finding']['observation_ids'])}\n남은 검사: {' / '.join(s['finding'].get('remaining_checks',[]))}" for s in document['case_synthesis'])).encode()
     generated['ANALYSIS_LEDGER.json'] = json.dumps(document['tool_receipts'], ensure_ascii=False, indent=2).encode()
     generated['RESULT_REVISION.json'] = json.dumps({'report_id':document['id'], 'result_revision':document['case'].get('result_revision'),
         'generated_at':document['generated_at'], 'artifacts':['report.json','IOC_LIST.csv','TIMELINE.csv','EVIDENCE_MANIFEST.csv']},ensure_ascii=False,indent=2).encode()

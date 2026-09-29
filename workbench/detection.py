@@ -48,18 +48,28 @@ def text_hits(path, data, base_offset=0, first_line=1):
     for number, raw in enumerate(data.splitlines(keepends=True), first_line):
         start=offset;offset+=len(raw)
         line=raw.decode('utf-8',errors='replace')
-        if not re.search(r'curl|wget|/dev/tcp|nc(?:at)?|socat|socket|history|HISTFILE|/var/log|LD_PRELOAD|iptables|firewalld|eval|assert|system|shell_exec|passthru|popen|/tmp/|/dev/shm/',line,re.I) and path not in ('/etc/passwd','/etc/ld.so.preload'):continue
+        stripped=line.strip()
+        if not stripped or stripped.startswith('#'):continue
+        # Apply the actual rule regexes before tokenizing.  This keeps the
+        # cheap path exact: unlike a hand-maintained broad prefilter it cannot
+        # introduce false negatives when RULES changes or uses unanchored
+        # patterns.  Literal/comment lines are still rejected below.
+        candidates=[(rule,title,severity) for rule,title,severity,pattern in COMPILED
+               if pattern.search(stripped)]
+        if path=='/etc/ld.so.preload' and stripped.split('#')[0].strip():candidates.append(('preload_config','전역 라이브러리 사전 로드 설정','high'))
+        if path=='/etc/passwd':
+            parts=stripped.split(':')
+            if len(parts)>=7 and parts[2]=='0' and parts[0]!='root':candidates.append(('extra_uid_zero','root 이외 UID 0 계정','high'))
+        if re.search(r'/cron(?:\.|/)|/systemd/(?:system|user)/|/rc\.local$',path) and re.search(r'(?:/tmp/|/var/tmp/|/dev/shm/)',stripped):candidates.append(('writable_persistence','쓰기 쉬운 경로의 파일을 자동 호출하는 설정','high'))
+        if not candidates:continue
         code,context=executable_text(line)
         if not code:continue
-        rules=[]
-        for rule,title,severity,pattern in COMPILED:
-            if pattern.search(code):rules.append((rule,title,severity))
+        rules=[(rule,title,severity) for rule,title,severity,pattern in COMPILED if pattern.search(code)]
         if path=='/etc/ld.so.preload' and code.split('#')[0].strip():rules.append(('preload_config','전역 라이브러리 사전 로드 설정','high'))
         if path=='/etc/passwd':
             parts=code.split(':')
             if len(parts)>=7 and parts[2]=='0' and parts[0]!='root':rules.append(('extra_uid_zero','root 이외 UID 0 계정','high'))
-        if re.search(r'/cron(?:\.|/)|/systemd/(?:system|user)/|/rc\.local$',path) and re.search(r'(?:/tmp/|/var/tmp/|/dev/shm/)',code):
-            rules.append(('writable_persistence','쓰기 쉬운 경로의 파일을 자동 호출하는 설정','high'))
+        if re.search(r'/cron(?:\.|/)|/systemd/(?:system|user)/|/rc\.local$',path) and re.search(r'(?:/tmp/|/var/tmp/|/dev/shm/)',code):rules.append(('writable_persistence','쓰기 쉬운 경로의 파일을 자동 호출하는 설정','high'))
         for rule,title,severity in rules:
             yield {'rule_id':rule,'title':title,'severity':severity,'rule_version':VERSION,
                    'path':path,'line':number,'byte_offset':start,'byte_length':len(raw),

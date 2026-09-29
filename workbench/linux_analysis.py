@@ -8,6 +8,7 @@ import hashlib
 import ipaddress
 import posixpath
 import re
+import shlex
 import struct
 from datetime import datetime, timezone
 
@@ -68,14 +69,75 @@ def stamp(line, mtime, tz, path):
 
 
 def normalize_command(command, cwd=None):
+    """Extract bounded whole-word path candidates without evaluating a shell.
+
+    Slashes inside schedules, regexes, URLs and option syntax are not paths.
+    Tilde/variable/glob expansion depends on evidence-side runtime context; the
+    examiner's HOME, environment and cwd must never be used to resolve it.
+    This is conservative lexical evidence, not a complete shell interpreter or
+    proof that an argument was used as a file.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars='();|&<>`')
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        # Keep the untouched command in the observation; incomplete quoting
+        # cannot justify inventing an absolute path from an inner substring.
+        return []
     paths = []
-    for token in re.findall(r'(?<!\w)(?:/|\./|\.\./)[\w./+@%=-]+', command):
-        if token.startswith('/'):
-            path = posixpath.normpath(token)
-        elif cwd:
-            path = posixpath.normpath(posixpath.join(cwd, token))
-        else: path = None
-        paths.append({'original': token, 'absolute': path, 'basis': '기록된 작업경로' if cwd else '절대경로 또는 작업경로 미확인'})
+    interpreter = None
+    script_seen = False
+    script_next = False
+    script_file_next = False
+    command_start = True
+    for word in words:
+        if word and all(c in '();|&<>`' for c in word):
+            if any(c in ';|&()`' for c in word):
+                interpreter = None; command_start = True; script_seen = False
+                script_next = False; script_file_next = False
+            continue
+        assignment = re.match(r'^(?:[A-Za-z_][A-Za-z_0-9]*|--[A-Za-z0-9_-]+)=(.*)$', word, re.S)
+        token = assignment[1] if assignment else word
+        if command_start and not assignment:
+            interpreter = posixpath.basename(word) if posixpath.basename(word) in ('sed', 'awk', 'gawk', 'mawk') else None
+            command_start = False
+        elif interpreter:
+            # Script operands are code/regex, while -f operands are filenames.
+            # These are language argument grammars, not product-name trust rules.
+            if script_next:
+                script_next = False; script_seen = True; continue
+            if script_file_next:
+                script_file_next = False; script_seen = True
+            elif word in ('-e', '--expression'):
+                script_next = True; continue
+            elif word in ('-f', '--file'):
+                script_file_next = True; continue
+            elif word.startswith(('--expression=', '-e')):
+                script_seen = True; continue
+            elif word.startswith('--file='):
+                token = word.partition('=')[2]; script_seen = True
+            elif word.startswith('-f') and len(word) > 2:
+                token = word[2:]; script_seen = True
+            elif word.startswith('-'):
+                continue
+            elif not script_seen:
+                script_seen = True; continue
+        if not re.match(r'^(?:/|\./|\.\./|~(?:[^/\s]*)/|\$(?:\{[^}]+\}|[A-Za-z_][A-Za-z_0-9]*)(?:/|$))', token):
+            continue
+        unresolved = (token.startswith(('~', '$')) or any(c in token for c in '$`*?[]{}();|<>\n'))
+        path = None
+        basis = '셸 확장·홈·문법 문맥 미확인; 원문 후보만 보존'
+        if not unresolved:
+            if token.startswith('/'):
+                path = posixpath.normpath(token); basis = '기록된 절대경로 후보'
+            elif cwd and cwd.startswith('/') and not any(c in cwd for c in '$`*?[]{}'):
+                path = posixpath.normpath(posixpath.join(cwd, token)); basis = '기록된 작업경로 기준 후보'
+            else:
+                basis = '상대경로 후보; 기록된 작업경로 미확인'
+        candidate = {'original': token, 'absolute': path, 'basis': basis}
+        if candidate not in paths:
+            paths.append(candidate)
     return paths[:20]
 
 
@@ -118,6 +180,10 @@ def text_events(path, data, mtime, tz):
                           outcome='accepted' if auth[1] == 'Accepted' else 'failed', stage='인증 성공' if auth[1] == 'Accepted' else '인증 실패')
         elif re.search(r'(?:session (?:opened|closed)|sudo:.*COMMAND=|authentication failure|PAM.*(?:faulty|unable))', line):
             kind = 'linux_session'; fields['stage'] = '세션·권한 기록'
+            pam=re.search(r'session (opened|closed) for user (\S+)',line)
+            sudo=re.search(r'sudo:\s+(\S+)\s*:.*?TTY=([^;]+);.*?USER=([^;]+);.*?COMMAND=(.*)',line)
+            if pam:fields.update(user=pam[2].split('(')[0],session_event=pam[1])
+            if sudo:fields.update(user=sudo[1],terminal=sudo[2].strip(),target_user=sudo[3].strip(),command=sudo[4])
         elif history:
             kind = 'linux_command'; fields.update(command=line, user=path.split('/')[1] if path.startswith('/root/') else path.split('/')[2], stage='셸 이력')
             timestamp, fields['time_basis'] = history_time, 'bash history epoch' if history_time else '셸 이력 시각 미보존'
@@ -149,6 +215,11 @@ def text_events(path, data, mtime, tz):
         elif not inspection_source and re.search(r'(?:Starting |Started |Stopped |shutdown|reboot|Out of memory|Killed process|segfault|link.*down|time.*changed)', line, re.I):
             kind = 'linux_system_event'; fields['stage'] = '시스템 기록'
         if kind:
+            # Preserve explicit native identifiers. A syslog PID is not a
+            # session ID and cannot connect authentication to arbitrary commands.
+            for name,pattern in (('session_id',r'\bses=(\d+)\b'),('boot_id',r'\b_BOOT_ID=([a-fA-F0-9]{32})\b')):
+                match=re.search(pattern,line)
+                if match:fields[name]=match[1]
             text = fields.get('command', line)
             fields['signals'] = [k for k, pattern in SIGNALS.items() if pattern.search(text)]
             fields['inspection_context'] = inspection_source or inspection_report or bool(CHECK_TOOL.search(text))

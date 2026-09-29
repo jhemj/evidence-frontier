@@ -11,6 +11,7 @@ import sqlite3
 import threading
 import subprocess
 import sys
+import time
 from pathlib import Path
 from .store import now
 from .worker import execute
@@ -34,6 +35,7 @@ class WorkerJobs:
             fcntl.flock(self.process_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.evidence_root = evidence_root
         self.lock = threading.RLock(); self.wake = threading.Event(); self.stop = threading.Event()
+        self.progress_records = {}
         self.db = sqlite3.connect(self.root / 'jobs.sqlite3', check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, updated_at TEXT NOT NULL, error TEXT); CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, owner TEXT NOT NULL, started_at TEXT NOT NULL);')
@@ -83,6 +85,11 @@ class WorkerJobs:
             state.update(result=envelope['result'], result_sha256=envelope['result_sha256'])
         return state
 
+    def progress(self, identity):
+        with self.lock:
+            record = self.progress_records.get(identity)
+            return dict(record) if record else None
+
     def loop(self):
         while not self.stop.is_set():
             with self.lock:
@@ -97,6 +104,14 @@ class WorkerJobs:
             if not row:
                 self.wake.wait(1); self.wake.clear(); continue
             identity = row['id']; body = json.loads(row['request'])
+            started = time.monotonic()
+            def progress(**fields):
+                # A progress hint is never a completion receipt. It is discarded
+                # on restart and cannot bypass execution_unknown recovery.
+                with self.lock:
+                    self.progress_records[identity] = {'action':body['action'],
+                        'stage':body['action'], 'elapsed_seconds':round(time.monotonic()-started), **fields}
+            progress()
             try:
                 if metadata(self.evidence_root, body['path'])['signature'] != body['signature']: raise ValueError('원본 구성이 변경되었습니다.')
                 if body['action'] == 'investigation_tool':
@@ -108,7 +123,7 @@ class WorkerJobs:
                         capture_output=True,timeout=180,env={**os.environ,'EVIDENCE_ROOT':str(self.evidence_root),'ANALYSIS_ROOT':str(self.root.parent)})
                     if process.returncode:raise ValueError(process.stderr.decode(errors='replace')[-1500:])
                     result=json.loads(output_path.read_bytes())
-                else: result = execute(self.evidence_root, body['action'], body['path'])
+                else: result = execute(self.evidence_root, body['action'], body['path'], progress)
                 if metadata(self.evidence_root, body['path'])['signature'] != body['signature']: raise ValueError('실행 중 원본 구성이 변경되었습니다.')
                 envelope = {'result': result, 'result_sha256': self.digest(result),
                             'runtime_code':self.runtime_code,
@@ -124,3 +139,5 @@ class WorkerJobs:
                     self.db.execute("UPDATE jobs SET status='succeeded',updated_at=?,error=NULL WHERE id=?", (now(), identity))
             except Exception as ex:
                 with self.lock: self.db.execute("UPDATE jobs SET status='failed',updated_at=?,error=? WHERE id=?", (now(), str(ex), identity))
+            finally:
+                with self.lock:self.progress_records.pop(identity, None)

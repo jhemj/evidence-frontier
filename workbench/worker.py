@@ -17,7 +17,29 @@ DISK_SUFFIXES={'.e01','.raw','.dd','.img'}
 
 
 def partition_inventory(path):
-    raw=command(['mmls',str(path)])
+    try:
+        raw=command(['mmls',str(path)])
+    except RuntimeError as error:
+        # Isolate Dissect's Target/disks.apply memory from the long-lived
+        # worker. A failed or ambiguous probe preserves the original mmls error.
+        try:
+            raw_probe = command([sys.executable, '-m', 'workbench.partition_probe', str(path)], timeout=300)
+            payload = json.loads(raw_probe.strip().splitlines()[-1])
+            if payload.get('ok') is not True:
+                raise ValueError('partition probe rejected image')
+            info = payload['probe']
+            if info.get('offset') != 0 or info.get('filesystem') not in ('xfs', 'ext'):
+                raise ValueError('partition probe returned invalid scope')
+            fs = info['filesystem']; size = info['size']
+            if type(size) is not int or size <= 0:
+                raise ValueError('partition probe returned invalid size')
+            return {'raw_output':str(error), 'sector_size':512,
+                    'adapter':'Dissect partition-image header', 'layout':'single_filesystem_image',
+                    'independent_partition_check':False,
+                    'partitions':[{'slot':'image','offset_sectors':0,'offset':0,'size':size,
+                                   'description':fs+' filesystem image; no partition table'}]}
+        except Exception:
+            raise error
     unit=re.search(r'Units are in (\d+)-byte sectors',raw)
     if not unit:raise ValueError('TSK sector 단위를 확인할 수 없습니다.')
     sector=int(unit.group(1));partitions=[]
@@ -40,8 +62,24 @@ def filesystem_events(path):
             if len(observations)>=MAX_EVENTS:raise ValueError('파일 목록 예산을 초과했습니다. 더 좁은 파티션 범위의 외부 workflow가 필요합니다.')
             _,name,inode,mode,owner,group,size,*times=fields
             observations.append({'type':'filesystem_entry','timestamp':None,'source_location':f'{path.name}:sector:{partition["offset_sectors"]}:inode:{inode}',
-                'fields':{'path':name,'inode':inode,'mode':mode,'uid':owner,'gid':group,'size':int(size),'atime_epoch':times[0],'mtime_epoch':times[1],'ctime_epoch':times[2],'crtime_epoch':times[3]}})
+                'fields':{'path':name,'inode':inode,'partition_offset':partition['offset'],'mode':mode,'uid':owner,'gid':group,'size':int(size),'atime_epoch':times[0],'mtime_epoch':times[1],'ctime_epoch':times[2],'crtime_epoch':times[3]}})
     return observations
+
+
+def filesystem_timeline(events):
+    """Expand metadata clocks without discarding the source object's identity."""
+    from .temporal import file_anchors
+    expanded=[]
+    for event in events:
+        f=event['fields']
+        identity={k:f[k] for k in ('path','inode','partition_offset','filesystem','os_instance','volume_id','snapshot_id') if k in f}
+        for anchor in file_anchors({**event,'id':'source'}):
+            expanded.append({**event,'type':'filesystem_time','timestamp':anchor['raw'],
+                'fields':{**identity,'time_type':anchor['time_type'],
+                    anchor['time_type']+'_ns':anchor['epoch_nanoseconds'],
+                    'time_kind':'file_metadata','time_basis':'source filesystem metadata; not event occurrence'}})
+            if len(expanded)>MAX_EVENTS:raise ValueError('타임라인 예산을 초과했습니다.')
+    return expanded
 
 
 def safe_path(root, relative):
@@ -78,6 +116,11 @@ def command(args, timeout=300):
                     p.kill(); p.wait()
                     raise TimeoutError('도구 시간 또는 출력 예산을 초과했습니다.')
                 time.sleep(.1)
+            # A short-lived process can exit between the last poll and the
+            # output-budget check above.  Check the final size before reading,
+            # otherwise a completed command can be silently truncated.
+            if os.fstat(output.fileno()).st_size > 32*1024*1024:
+                raise TimeoutError('도구 시간 또는 출력 예산을 초과했습니다.')
             output.seek(0)
             raw=output.read(32*1024*1024)
         finally:
@@ -94,12 +137,13 @@ def segments(path):
     # Only explicitly supported numeric E01..E99 segments. Other encodings fail closed.
     if path.suffix.lower()=='.ex01':
         raise NotImplementedError('Ex01 segment 무결성 검증은 아직 지원하지 않습니다.')
-    candidates = sorted(path.parent.glob(path.stem+'.*'))
+    # Literal stem comparison: brackets/glob characters are valid evidence names.
+    candidates = sorted(p for p in path.parent.iterdir() if p.stem == path.stem)
     relevant = [p for p in candidates if re.fullmatch(r'\.e\d{2}',p.suffix,re.I)]
     if any(re.fullmatch(r'\.e[a-z]{2}',p.suffix,re.I) for p in candidates):
         raise NotImplementedError('EAA 이후 segment 순서는 별도 검증이 필요합니다.')
     numbers = sorted(int(p.suffix[2:]) for p in relevant)
-    if numbers != list(range(1,len(numbers)+1)):
+    if not numbers or numbers != list(range(1,len(numbers)+1)):
         raise ValueError('E01 segment가 중간에 누락되었습니다.')
     return sorted(relevant,key=lambda p:int(p.suffix[2:]))
 
@@ -150,15 +194,46 @@ def execute(root, action, relative, progress=None):
                 after=part.stat()
                 if (before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns):
                     raise ValueError('해시 계산 중 증거 파일이 변경되었습니다.')
-                manifest.append({'name':part.name,'sha256':digest,'size':after.st_size})
+                manifest.append({'name':part.name,'sha256':digest,'size':after.st_size,
+                    'hash_algorithm':'sha256','hash_scope':'evidence segment bytes' if len(parts)>1 else 'input file bytes',
+                    'independently_computed':True,'hash_source':'frontier streaming read'})
                 done+=after.st_size
             result['manifest']=manifest
             if path.suffix.lower()=='.e01':
                 update(stage='ewf_verify',bytes_done=done,total_bytes=total,segment_count=len(parts))
-                result['verification']=command(['ewfverify','-d','sha256',str(path)],int(os.getenv('EWF_TIMEOUT','7200')))
                 result['tool']='libewf ewfverify'
                 result['version']=command(['ewfverify','-V']).strip()[:200]
-            result['observations']=[dict(type='integrity',source_location=relative,fields={'segments':manifest},timestamp=None)]
+                # Reuse only after freshly hashing every physical segment. A
+                # previous logical-image proof is not a new independent check.
+                from .integrity_cache import load_proof, save_proof
+                cache_root=Path(os.getenv('ANALYSIS_ROOT','/analysis'))/'integrity-proofs'
+                proof=load_proof(cache_root,manifest,result['version'])
+                if proof:
+                    result['verification']=proof['verification']['stdout']
+                    result['verification_reuse']={**proof['reuse'],
+                        'proof_sha256':proof['proof_sha256'],
+                        'recorded_at':proof['verification']['recorded_at'],
+                        'basis':'fresh SHA-256 of every physical segment and identical verifier contract/version'}
+                else:
+                    result['verification']=command(['ewfverify','-d','sha256',str(path)],int(os.getenv('EWF_TIMEOUT','7200')))
+                    try:
+                        proof=save_proof(cache_root,manifest,result['version'],verification_stdout=result['verification'])
+                        result['verification_proof_sha256']=proof['proof_sha256']
+                    except (OSError,ValueError) as ex:
+                        # A cache write is optional; the just-completed verifier
+                        # remains authoritative and must not be reported failed.
+                        result['verification_cache_warning']=str(ex)[:500]
+            from .integrity_scope import assess
+            result['integrity_scope']=assess(result.get('verification',''),bool(result.get('verification_reuse')))
+            result['observations']=[dict(type='integrity',source_location=relative,
+                fields={'segments':manifest,'integrity_scope':result['integrity_scope']},timestamp=None)]
+        elif action=='windows_scan':
+            output_root=Path(os.getenv('ANALYSIS_ROOT','/analysis'))
+            output_root.mkdir(parents=True,exist_ok=True)
+            raw=command([sys.executable,'-m','workbench.windows_scan',str(path),str(output_root)],timeout=7200)
+            run_id=json.loads(raw.strip().splitlines()[-1])['run_id']
+            if not re.fullmatch(r'RUN-[a-f0-9]{32}',run_id):raise ValueError('잘못된 분석 결과 식별자')
+            result=json.loads((output_root/run_id/'result.json').read_text(encoding='utf-8'))
         elif action=='linux_scan':
             if path.suffix.lower() not in DISK_SUFFIXES:raise NotImplementedError('Linux 디스크 이미지에만 적용합니다.')
             output_root=Path(os.getenv('ANALYSIS_ROOT','/analysis'))
@@ -182,7 +257,11 @@ def execute(root, action, relative, progress=None):
         elif action=='inventory':
             if path.suffix.lower() in DISK_SUFFIXES:
                 inventory=partition_inventory(path)
-                result['tool']='TSK mmls';result['version']=command(['mmls','-V']).strip()[:200]
+                result['tool']=inventory.get('adapter','TSK mmls')
+                if inventory.get('adapter'):
+                    from importlib.metadata import version
+                    result['version']=version('dissect.target')
+                else:result['version']=command(['mmls','-V']).strip()[:200]
                 result['observations']=[dict(type='partition_inventory',source_location=relative,fields=inventory,timestamp=None)]
             else:
                 result['observations']=[dict(type='file_metadata',source_location=relative,fields={'name':path.name,'size':path.stat().st_size,'format':path.suffix},timestamp=None)]
@@ -201,14 +280,7 @@ def execute(root, action, relative, progress=None):
                     error=fallback['error'],scopes=fallback['scopes'])
             if action=='timeline':
                 if disk:
-                    expanded=[]
-                    for event in events:
-                        for field in ('atime_epoch','mtime_epoch','ctime_epoch','crtime_epoch'):
-                            value=int(event['fields'][field])
-                            if value>0:
-                                expanded.append({**event,'type':'filesystem_time','timestamp':datetime.fromtimestamp(value,timezone.utc).isoformat(),'fields':{'path':event['fields']['path'],'time_type':field,'value':value}})
-                            if len(expanded)>MAX_EVENTS:raise ValueError('타임라인 예산을 초과했습니다.')
-                    events=expanded
+                    events=filesystem_timeline(events)
                 events=sorted([e for e in events if e['timestamp']],key=lambda e:e['timestamp'])
             result['observations']=events
             if not events and not fallback: result['status']='covered_zero'
@@ -216,6 +288,8 @@ def execute(root, action, relative, progress=None):
             if path.suffix.lower() not in DISK_SUFFIXES:
                 raise NotImplementedError('이 입력 형식의 독립 파서 교차 검증은 아직 지원하지 않습니다.')
             tsk=partition_inventory(path)
+            if tsk.get('independent_partition_check') is False:
+                raise NotImplementedError('단일 파일시스템 이미지입니다. 저장 구조는 확인했지만 TSK 파티션 표 교차 비교는 적용할 수 없습니다.')
             raw=command([sys.executable,'-m','workbench.dissect_probe',str(path)],timeout=300)
             # Dissect may write diagnostic log lines; only the last JSON document is parsed.
             independent=json.loads(raw.strip().splitlines()[-1])

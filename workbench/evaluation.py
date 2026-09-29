@@ -1,4 +1,30 @@
 """Predeclared control metrics; never infer real-case detection rate from fixtures."""
+
+
+def score_investigation(candidate, gold):
+    """Held-out keys grade choices, not resemblance to a preferred prose answer."""
+    if not gold or not gold.get('cases'):
+        raise ValueError('Separate held-out gold cases are required')
+    expected={c['case_id']:c for c in gold['cases']}
+    answers=candidate.get('answers',[])
+    ids=[a.get('case_id') for a in answers]
+    if len(ids)!=len(set(ids)) or set(ids)-expected.keys():
+        raise ValueError('Duplicate or unknown answer case')
+    rows=[]
+    for cid,g in expected.items():
+        answer=next((a for a in answers if a['case_id']==cid),{})
+        selected=set(answer.get('observation_ids',[]));required=set(g['required_observation_ids'])
+        unknown=selected-set(g['allowed_observation_ids'])
+        unsupported=set(answer.get('asserted_claims',[])) & set(g.get('unsupported_claims',[]))
+        points=(2*len(selected & required)/len(required) if required else 0)
+        points+=int(answer.get('conclusion')==g['conclusion'])+int(answer.get('next_test')==g['next_test'])
+        points=max(0,points-2*(len(unknown)+len(unsupported)))
+        rows.append({'case_id':cid,'points':points,'possible':4,'missing_observations':sorted(required-selected),
+                     'unknown_observations':sorted(unknown),'unsupported_claims':sorted(unsupported)})
+    return {'cases':rows,'score':sum(r['points'] for r in rows),'possible_score':4*len(rows),
+            'real_case_detection_rate':None,'scope':'Synthetic held-out investigation choices, not production accuracy'}
+
+
 def evaluate(document, criteria):
     observations={o['id']:o for o in document['observations']}
     detected=[o for o in observations.values() if o['type']=='linux_detection']
@@ -19,6 +45,7 @@ def evaluate(document, criteria):
     current=[d for d in dossiers if (d['task_id'],d.get('generation',0)) in generations]
     reviewed=[d for d in current if d['status']=='reviewed' and d.get('finding')]
     findings=[f for j in document.get('judgments',[]) for f in j['findings']]
+    findings += [s['finding'] for s in document.get('case_synthesis',[])]
     unknown=sum(len(set(f.get('observation_ids',[]))-observations.keys()) for f in findings)
     violations=[]
     for f in findings:

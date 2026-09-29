@@ -41,16 +41,30 @@ with zipfile.ZipFile(destination) as archive:
     document = json.loads(archive.read('report.json'))
     if record.get('snapshot'):
         assert record['snapshot']==manifest['snapshot']==document['snapshot']
-        assert record['result_revision']==document['case']['result_revision']
+        assert record.get('result_revision')==document['case'].get('result_revision')
     observations = {o['id']: o for o in document['observations']}
     for claim in document['claims'] + document.get('automatic_findings', []):
         assert set(claim['observation_ids']).issubset(observations), claim['id']
     judgments = [finding for result in document.get('judgments', []) for finding in result['findings']]
+    judgments += [row['finding'] for row in document.get('case_synthesis', [])]
+    for row in document.get('case_synthesis',[]):
+        assert set(row.get('supporting_evidence_ids',[])+row.get('refuting_evidence_ids',[])).issubset(observations)
     for finding in judgments:
         assert finding['judgment'] in ('확인', '유력', '미확인')
         assert set(finding['observation_ids']).issubset(observations)
         assert finding['judgment'] == '미확인' or finding['observation_ids']
-    dossier_ids={d['id'] for d in document.get('dossiers',[])}
+        assert all(set(stage['observation_ids']).issubset(observations) for stage in finding.get('stages',[]))
+    if document.get('schema_version')=='1.2':
+        from html.parser import HTMLParser
+        class Anchors(HTMLParser):
+            def __init__(self):super().__init__();self.ids=set();self.refs=set()
+            def handle_starttag(self,tag,attrs):
+                attrs=dict(attrs)
+                if 'id' in attrs:self.ids.add(attrs['id'])
+                if attrs.get('href','').startswith('#'):self.refs.add(attrs['href'][1:])
+        anchors=Anchors();anchors.feed(archive.read('report.html').decode())
+        assert anchors.refs.issubset(anchors.ids),'report citation anchor missing'
+    dossier_ids={d['id'] for d in document.get('dossiers',[])+document.get('dossier_history',[])}
     for historical in document.get('review_progress',{}).get('historical_assessments',[]):
         assert historical['freshness']=='historical_not_revalidated'
         assert historical['dossier_id'] in dossier_ids
@@ -69,6 +83,10 @@ with zipfile.ZipFile(destination) as archive:
         previous = ''; timeline_count = 0
         with archive.open('TIMELINE.csv') as stream:
             for row in csv.DictReader(io.TextIOWrapper(stream, encoding='utf-8-sig')):
+                if not row['timestamp_kst']:
+                    from datetime import datetime
+                    assert datetime.fromisoformat(row['source_timestamp']).tzinfo is None
+                    continue
                 assert row['timestamp_kst'].endswith('+09:00')
                 assert row['timestamp_kst'] >= previous
                 previous = row['timestamp_kst']; timeline_count += 1

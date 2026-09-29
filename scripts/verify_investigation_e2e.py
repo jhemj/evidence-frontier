@@ -37,6 +37,16 @@ with zipfile.ZipFile(io.BytesIO(request('/api/reports/'+state['report'][-1]['id'
     assert any('scp' in o['fields'].get('command','') for o in observations)
     assert not any(o['fields'].get('facts',{}).get('objective_success_confirmed') for o in observations)
     receipts=document['tool_receipts']
+    if document.get('schema_version')=='1.2':
+        synthesis=document['case_synthesis']
+        assert sorted(s['number'] for s in synthesis)==list(range(1,11)), 'final hypothesis synthesis incomplete'
+        assert all(s['status'] in ('reviewed','source_unavailable') for s in synthesis), 'final synthesis model failure'
+        assert all(set(s['finding']['observation_ids']).issubset(ids) for s in synthesis)
+        assert any(r.get('receipt_type')=='case_synthesis' and r.get('usage',{}).get('eval_count',0)>0 for r in receipts)
+        for name in ('FINAL_SYNTHESIS.json','CHECK_LEDGER.json','SESSION_LINKS.json','COVERAGE_DENOMINATORS.json','REQUIRED_MATERIALS.json','REVIEW_FAILURES.json'):
+            assert name in manifest['files'],name
+        assert document['completion']['execution_terminated']
+        assert not document['completion']['analysis_complete_in_supported_scope'], 'fixture has explicit unsupported collection scope'
     assert any(r.get('receipt_type')=='investigator_model' and r.get('usage',{}).get('eval_count',0)>0 for r in receipts)
     assert any(r.get('receipt_type')=='investigation_tool' and r.get('request',{}).get('tool')=='read_file' for r in receipts)
     assert any(r.get('receipt_type')=='automatic_falsifier' for r in receipts)

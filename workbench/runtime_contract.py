@@ -18,8 +18,12 @@ def code_identity():
 
 
 def binding(code, provider):
-    safe={k:provider.get(k) for k in ('model','falsifier_model','base_url','protocol','trusted_lan','temperature','num_ctx') if k in provider}
+    from .models import ProviderConfig
+    from .procedures import identity
+    normalized=ProviderConfig.model_validate(provider).model_dump()
+    safe=dict(normalized)
     value={'version':'runtime-contract-1','source_sha256':code,'provider':safe,
+        'investigator_contract':'investigator-proposals-1','procedures':identity(normalized['investigation_strategy']),
         'release':os.getenv('FRONTIER_RELEASE','unrecorded'),
         'model_digest':os.getenv('FRONTIER_MODEL_DIGEST','unverified'),
         'worker_image':os.getenv('FRONTIER_WORKER_IMAGE','unverified'),

@@ -5,7 +5,7 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import FileResponse,HTMLResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -81,7 +81,17 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
             result=controller.snapshot(case_id)
             result['view_revision']=revision
         if not result.get('unchanged'):
+            from .triage import project as triage_projection
+            result['triage'] = triage_projection(result)
+            from .incident_status import project as incident_projection
+            result['incident_status'] = incident_projection(result)
+            from .scenarios import project as scenario_projection
+            result['scenarios'] = scenario_projection(result)
             trim_snapshot(result)
+        from .activity import page as activity_page
+        result['activity']=activity_page(store,case_id,limit=5)
+        from .eta import estimate
+        result['eta_estimate']=estimate(store,case_id)
         if os.getenv('WORKER_URL'):
             for task in result['task']:
                 if task['status']=='queued' and task.get('started_at') and result['case']['status'] in ('running','pause_requested'):
@@ -91,6 +101,13 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
                     try:task['progress']=worker_request('GET','/progress',params={'path':source['path']},timeout=2)
                     except Exception:pass
         return result
+
+    @app.get('/api/cases/{case_id}/activity')
+    def activity(case_id:str,status:str=Query('',pattern='^(|running|waiting|paused|interrupted|done|partial|failed)$'),
+                 kind:str=Query('',pattern='^(|collection|tool|model|report)$'),
+                 offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=100)):
+        from .activity import page
+        return page(store,case_id,status,kind,offset,limit)
 
     def trim_snapshot(result):
         # Keep large event streams out of polling. Search endpoint returns individual pages.
@@ -148,16 +165,30 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
         return configs[-1]['provider'] if configs else ProviderConfig().model_dump()
 
     @app.get('/api/settings')
-    def settings():return config()
+    def settings():return ProviderConfig.model_validate(config()).model_dump()
 
     @app.put('/api/settings')
     def settings_save(body:ProviderConfig):
         validate_url(body.base_url,body.trusted_lan)
-        store.add('config','',provider=body.model_dump());return body
+        if body.secondary:validate_url(body.secondary.base_url,body.secondary.trusted_lan)
+        with store.tx():
+            active=[c for c in store.list('case') if c['status'] in ('running','pause_requested')]
+            if active:raise ValueError('진행 중인 조사가 있습니다. 종료 또는 일시정지 후 설정을 변경하세요. 변경된 실행 설정은 새 사건에 적용하세요.')
+            store.add('config','',provider=body.model_dump())
+        return body
 
     @app.post('/api/settings/probe')
     def probe(body:ProviderConfig):
-        try:return {'models':Provider(body.model_dump()).models()}
+        try:
+            result={'models':Provider(body.model_dump()).models()}
+            if body.secondary:
+                provider=Provider(body.model_dump())
+                provider.pool_config['role_routes']={**provider.pool_config['role_routes'],'analyst':'secondary'}
+                try:
+                    provider.select_role('analyst')
+                    result['secondary_models']=provider.models()
+                finally:provider.client.close()
+            return result
         except Exception as e:raise ValueError(f'모델 연결을 확인하지 못했습니다: {e}')
 
     @app.post('/api/cases/{case_id}/messages')
@@ -178,7 +209,10 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
         controller.store.get(case_id,'case')
         items=store.list('observation',case_id)
         if q:items=[i for i in items if q.casefold() in json.dumps(i,ensure_ascii=False).casefold()]
-        return {'total':len(items),'items':items[max(0,offset):max(0,offset)+100]}
+        # JSON numbers above 2**53 lose precision in browser Number values.
+        # Supply an exact display string without changing ledger field types.
+        page=items[max(0,offset):max(0,offset)+100]
+        return {'total':len(items),'items':[{**i,'fields_display_json':json.dumps(i.get('fields',{}),ensure_ascii=False,indent=2)} for i in page]}
 
     @app.get('/api/observations/{observation_id}/source')
     def source(observation_id:str):
@@ -192,7 +226,9 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
         return FileResponse(path,filename=observation_id+'.bin',media_type='application/octet-stream')
 
     @app.get('/api/cases/{case_id}/report-preview',response_class=HTMLResponse)
-    def preview(case_id:str):return render(preview_document(controller,case_id))
+    def preview(case_id:str,reader:str='executive'):
+        if reader not in ('executive','analyst'):raise HTTPException(400,'지원하지 않는 보고서 보기')
+        return render(preview_document(controller,case_id),reader)
 
     @app.post('/api/cases/{case_id}/reports')
     def create_report(case_id:str):
@@ -202,6 +238,22 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
     def download(record_id:str):
         report=store.get(record_id,'report')
         return FileResponse(reports/report['report_id']/'report.zip',filename=report['report_id']+'.zip')
+
+    @app.get('/api/reports/{record_id}/files/{filename}')
+    def report_file(record_id:str,filename:str):
+        if filename not in ('executive.html','analyst.html','executive.docx','analyst.docx'):
+            raise HTTPException(404,'지원하지 않는 배포 파일')
+        report=store.get(record_id,'report')
+        expected=report.get('distributed_files',{}).get(filename)
+        if not expected:raise HTTPException(409,'이전 형식의 보고서입니다. 새 스냅샷을 저장하세요.')
+        from .investigation_export import digest_file
+        path=reports/report['report_id']/filename
+        if not path.is_file() or digest_file(path)!=expected:raise HTTPException(409,'저장된 보고서 무결성 검증 실패')
+        changed=store.report_revision(report['case_id'])!=report['snapshot']['scope_revision']
+        media='text/html' if filename.endswith('.html') else 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        return FileResponse(path,media_type=media,filename=report['report_id']+'-'+filename,
+            content_disposition_type='inline' if filename.endswith('.html') else 'attachment',
+            headers={'X-Report-Scope-Changed':str(changed).lower(),'X-Report-Id':report['report_id']})
 
     app.mount('/',StaticFiles(directory=ROOT/'dist',html=True),name='ui')
     return app

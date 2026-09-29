@@ -13,3 +13,21 @@ dist/.cache/
 config/openrelik-templates.json
 vendor/openrelik/runtime/
 artifacts/
+# Local incident reviews and machine-specific launchers are not public source.
+docs/E2E_ANALYST_REVIEW_*.md
+docs/E2E_MONITOR_*.md
+docs/PRO_REVIEW_DECISIONS_*.md
+docs/PRO_REVIEW_BRIEF_*_SANITIZED.md
+docs/PRO_ARCHITECTURE_REVIEW.md
+docs/CHERRY_PICK_*.md
+docs/IMPROVEMENTS_*.md
+docs/VALIDATION_*.md
+docs/WINDOWS_HARNESS_2026-09-23.md
+docs/INVESTIGATOR_STRATEGY_*.md
+docs/OBSERVER_UI_CONTRACT_*.md
+docs/UX_CHARACTER_PRO_REVIEW_*.md
+compose.real-test.yaml
+scripts/run_real_e01_test.py
+scripts/await_assisted_case.py
+scripts/probe_real_investigator.py
+scripts/check_public_snapshot.py

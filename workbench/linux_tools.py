@@ -8,12 +8,21 @@ import stat
 import tarfile
 import time
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from .worker import safe_path, command
 from .linux_analysis import indicators
 
 
 def execute_tool(evidence_root, analysis_root, body):
+    with ExitStack() as resources:
+        return _execute_tool(evidence_root, analysis_root, body, resources)
+
+
+def _execute_tool(evidence_root, analysis_root, body, resources):
+    if body.target_os=='windows':
+        from .windows_tools import execute_tool as windows_tool
+        return windows_tool(evidence_root,analysis_root,body)
     start = time.monotonic(); request = body.request
     result = {'tool': request.tool, 'query': request.query, 'path': request.path, 'observations': [], 'complete': False, 'status': 'partial'}
     try:
@@ -21,10 +30,11 @@ def execute_tool(evidence_root, analysis_root, body):
         if not re.fullmatch(r'RUN-[a-f0-9]{32}', body.run_id): raise ValueError('잘못된 조사 ID')
         run = Path(analysis_root) / body.run_id
         manifest = json.loads((run / 'manifest.json').read_text(encoding='utf-8'))
+        if manifest.get('platform','linux')!='linux':raise ValueError('Linux 요청으로 Windows 자료를 조사할 수 없습니다.')
         if manifest['image'] != image.name: raise ValueError('분석 원본이 일치하지 않습니다.')
         if request.tool == 'correlate':
             from .linux_correlate import correlate
-            return correlate(run)
+            return correlate(run, request)
         if request.tool == 'search':
             from .retrieval import search
             result = search(run, image, manifest, request)
@@ -32,13 +42,13 @@ def execute_tool(evidence_root, analysis_root, body):
             from .retrieval import read_source
             result = read_source(run, image, manifest, request)
         else:
-            from dissect.target import Target
+            from .image_target import open_target
             from dissect.target.filesystems.xfs import XfsFilesystem
             from dissect.target.filesystems.extfs import ExtFilesystem
             path = request.path
             if not path.startswith('/') or '\x00' in path or '..' in path.split('/') or len(path) > 1500:
                 raise ValueError('이미지 내부 절대경로만 허용합니다.')
-            target = Target.open(str(image), apply=False); target.disks.apply(); candidates = []
+            target = resources.enter_context(open_target(image, apply=False)); target.disks.apply(); candidates = []
             for volume in target.volumes:
                 if request.partition_offset is not None and volume.offset != request.partition_offset:continue
                 volume.seek(0); header = volume.read(4096); volume.seek(0)
@@ -56,7 +66,12 @@ def execute_tool(evidence_root, analysis_root, body):
                         continue
                     candidates.append((volume, s, node))
                 except FileNotFoundError: continue
-            if not candidates:raise ValueError('선택한 Linux 파일시스템에서 경로를 찾지 못했습니다. 과거 부재를 뜻하지 않습니다.')
+            if not candidates:
+                result['failure']={'code':'path_not_resolved','stage':'object_resolution','retryable':False,
+                    'resolver_version':'linux-image-resolution-1',
+                    'resolution_scope':{'partition_offset':request.partition_offset,'inode':request.inode,'path':path},
+                    'limitation':'Only this immutable image and resolver scope; not historical absence or deletion.'}
+                raise ValueError('선택한 Linux 파일시스템에서 경로를 찾지 못했습니다. 과거 부재를 뜻하지 않습니다.')
             if len(candidates)>1:raise ValueError('여러 파티션에 같은 경로가 있습니다. partition_offset으로 원문을 지정하세요.')
             volume, s, node = candidates[0]
             with node.open() as stream:
@@ -67,6 +82,8 @@ def execute_tool(evidence_root, analysis_root, body):
                 else:data=stream.read(16 * 1024 * 1024)
             derived = run / 'followup'; derived.mkdir(exist_ok=True)
             digest = hashlib.sha256(data).hexdigest(); destination = derived / (digest + '.bin')
+            from .disk_budget import require_space
+            require_space([(derived,len(data))])
             if not destination.exists(): destination.write_bytes(data)
             start_offset = request.byte_offset if request.tool == 'read_file' else 0
             complete = start_offset == 0 and len(data) == s.st_size
@@ -79,6 +96,12 @@ def execute_tool(evidence_root, analysis_root, body):
                       'byte_offset': 0, 'image_file_byte_offset': start_offset, 'byte_length': len(data), 'judgment': '확정', 'stage': '원문 재확인',
                       'hash_scope': 'full file' if complete else 'extracted byte range only',
                       'interpretation_limit': '원문을 읽기 전용으로 재추출. 실제 실행·통신·악성 판정과 구분'}
+            # Preserve parser precision and birth time when the image filesystem
+            # exposes them; these are not the extracted host object's timestamps.
+            for field,attribute in (('mtime_ns','st_mtime_ns'),('ctime_ns','st_ctime_ns'),('atime_ns','st_atime_ns'),
+                                    ('birthtime_ns','st_birthtime_ns'),('birthtime','st_birthtime')):
+                value=getattr(s,attribute,None)
+                if value is not None:fields['file_context'][field]=value
             if request.tool == 'read_file':
                 fields['excerpt'] = data.decode(errors='replace')
                 fields['excerpt_truncated'] = False
@@ -107,6 +130,12 @@ def execute_tool(evidence_root, analysis_root, body):
             result['observations'] = [event]
             result.update(complete=complete, status='covered' if complete else 'partial')
     except Exception as ex:
+        import errno
+        if isinstance(ex,(TimeoutError,BlockingIOError)) or isinstance(ex,OSError) and ex.errno in (
+                errno.EAGAIN,errno.EBUSY,errno.ETIMEDOUT,errno.ESTALE,errno.ENFILE,errno.EMFILE):
+            result['failure']={'code':'transient_read_error','stage':'tool_read','retryable':True,
+                'resolver_version':'linux-image-resolution-1',
+                'limitation':'Temporary read failure; no conclusion about source absence or content.'}
         result.update(status='failed', complete=False, error=f'{type(ex).__name__}: {ex}')
     result['elapsed_seconds'] = round(time.monotonic() - start, 3)
     return result

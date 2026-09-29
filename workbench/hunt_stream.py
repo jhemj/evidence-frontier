@@ -90,6 +90,7 @@ class Hunter:
         self.sources.append(source)
         for event in events:
             f=event['fields'];f['image_file_byte_offset']=offset+f.get('byte_offset',0)
+            f['source_range_start']=offset
             if 'line' in f:f['line']+=line-1
             if compressed:f['locator_basis']='gzip decompressed bytes'
             self.emit(event,source)

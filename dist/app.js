@@ -14,9 +14,14 @@ let current = null,
   token = "",
   busy = false,
   searchOffset = 0;
-let refreshInFlight = false;
+// Each selection owns its response, including A -> B -> A navigation.
+let caseSelectionVersion = 0;
+const refreshRequests = new Map();
+let pollInFlight = false;
 let progressReceivedAt = 0;
+let reportReader = 'executive', selectedReport = null, reportCase = null;
 const evidenceTypes = {linux_detection:"침해 관련 단서",linux_environment:"분석 환경",linux_coverage:"수집 범위",linux_command:"명령 기록",linux_authentication:"인증 기록",linux_session:"세션·권한",linux_persistence:"자동 실행 설정",linux_cron_call:"예약 작업 호출",linux_binary:"실행파일 정적 정보",linux_account:"계정",linux_ssh_trust:"SSH 신뢰 설정",linux_inspection_result:"이전 점검 결과",linux_network:"통신 기록",linux_tool_result:"추가 검사 결과",linux_path_match:"파일 경로",linux_literal_match:"원문 검색 일치",linux_persistence_link:"설정·호출 대조",linux_audit_group:"동일 audit 사건",linux_audit:"audit 기록",linux_login_record:"로그인 기록",linux_configuration:"설정",linux_system_event:"시스템 기록"};
+Object.assign(evidenceTypes, {windows_environment:"Windows 수집 범위",windows_event:"Windows 이벤트",windows_process:"프로세스 시작",windows_powershell_start:"PowerShell 엔진 시작",windows_scriptblock:"스크립트 기록",windows_network:"네트워크 시도·결과",windows_task:"예약작업 설정",windows_registry:"레지스트리 설정",windows_srum_application:"SRUM 앱 사용",windows_srum_network:"SRUM 통신 계수",windows_file:"파일 정적 정보",windows_prior_interpretation:"기존 분석가 해석",windows_source_excerpt:"보존 자료 발췌",windows_counterevidence:"경로 혼동 반대 근거",windows_correlation:"Windows 자료 대조"});
 const labels = {
   ready: "준비됨",
   running: "조사 중",
@@ -48,9 +53,10 @@ function toast(message) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => ($("toast").hidden = true), 7000);
 }
-async function api(path, method = "GET", body, raw = false) {
+async function api(path, method = "GET", body, raw = false, signal) {
   const response = await fetch("/api" + path, {
     method,
+    ...(signal ? {signal} : {}),
     headers: {
       "Content-Type": "application/json",
       "X-Requested-With": "frontier",
@@ -96,44 +102,78 @@ async function listCases() {
   return cases;
 }
 async function selectCase(id) {
+  if (id !== current) {
+    ++caseSelectionVersion;
+    snapshot = null;
+    $("workspace").hidden = true;
+    if (typeof resetReportPreview === 'function') resetReportPreview();
+  }
   current = id;
+  const selection = caseSelectionVersion;
   searchOffset = 0;
   $("welcome").hidden = true;
-  $("workspace").hidden = false;
-  await listCases();
-  await refresh();
+  await Promise.all([listCases(), refresh()]);
+  if (current !== id || selection !== caseSelectionVersion) return;
   await switchTab("investigate");
 }
-async function refresh() {
-  if (!current || refreshInFlight) return;
-  refreshInFlight = true;
-  try {
-  const previousCase = snapshot?.case;
+function requireCurrentSnapshot() {
+  if (!snapshot?.case || snapshot.case.id !== current)
+    throw Error("사건 정보를 불러오는 중입니다. 잠시 후 다시 시도하세요.");
+  return snapshot;
+}
+function validateSnapshot(value, caseId, base, revision) {
+  const invalid = () => { throw Error("사건 정보를 확인할 수 없습니다. 잠시 후 다시 불러와 주세요."); };
+  if (!value || value.case?.id !== caseId || typeof value.case.status !== 'string') invalid();
+  if (value.unchanged && (!base || !revision || value.view_revision !== revision)) invalid();
+  const next = value.unchanged ? {...base, ...value} : value;
+  for (const key of ['evidence', 'task', 'report', 'coverage', 'hypothesis', 'message', 'claim'])
+    if (!Array.isArray(next[key])) invalid();
+  if (!next.summary || typeof next.summary !== 'object') invalid();
+  return next;
+}
+function refresh() {
+  if (!current) return Promise.resolve(null);
+  const selection = caseSelectionVersion;
+  // A skipped request is not a completed refresh: every caller must await it.
+  if (refreshRequests.has(selection)) return refreshRequests.get(selection);
   const requestedCase = current;
-  const revision = snapshot?.case.id === requestedCase ? snapshot.view_revision : "";
-  const nextSnapshot = await api("/cases/" + requestedCase + (revision ? "?since="+encodeURIComponent(revision) : ""));
-  if (current !== requestedCase) return;
-  snapshot = nextSnapshot.unchanged ? {...snapshot,case:nextSnapshot.case,task:nextSnapshot.task,evidence:nextSnapshot.evidence} : nextSnapshot;
-  progressReceivedAt = Date.now();
-  renderSnapshot();
-  if (previousCase?.id === current && previousCase.status !== snapshot.case.status)
-    await listCases();
-  } finally { refreshInFlight = false; }
+  const ownsSelection = () => current === requestedCase && caseSelectionVersion === selection;
+  const base = snapshot?.case?.id === requestedCase ? snapshot : null;
+  const revision = base?.view_revision || '';
+  const promise = (async () => {
+    try {
+      const response = await api("/cases/" + requestedCase + (revision ? "?since="+encodeURIComponent(revision) : ""));
+      if (!ownsSelection()) return null;
+      snapshot = validateSnapshot(response, requestedCase, base, revision);
+      progressReceivedAt = Date.now();
+      renderSnapshot();
+      $("workspace").hidden = false;
+      if (base && base.case.status !== snapshot.case.status) await listCases();
+      return ownsSelection() ? snapshot : null;
+    } catch (error) {
+      if (!ownsSelection()) return null;
+      throw error;
+    } finally { refreshRequests.delete(selection); }
+  })();
+  refreshRequests.set(selection, promise);
+  return promise;
 }
 function renderSnapshot() {
+  if (!snapshot?.case || snapshot.case.id !== current) return;
   const s = snapshot,
     c = s.case;
   renderInvestigationProgress(s, progressReceivedAt);
+  if (typeof renderCockpit === 'function') renderCockpit(s);
   const timelineSources = new Set(s.evidence.filter(e=>e.connected!==false).map(e=>e.id));
   const timelineTasks = s.task.filter(t=>timelineSources.has(t.evidence_id));
   const timelineTask = timelineTasks.find(t => t.status === "running") || timelineTasks.find(t => t.status === "queued");
   const huntProgress = timelineTask?.progress;
   if (s.visual_timeline) s.visual_timeline.progress = {
-    index: {linux_scan:1, linux_investigate:2, ai_judgment:3, investigation_report:4}[timelineTask?.action] ?? (timelineTask ? 0 : 4),
+    index: {linux_scan:1, windows_scan:1, linux_investigate:2, windows_investigate:2, ai_judgment:3, investigation_report:4}[timelineTask?.action] ?? (timelineTask ? 0 : 4),
     text: huntProgress?.stage === "linux_hunt"
       ? `기본 점검 ${(huntProgress.files_done || 0).toLocaleString()} / ${(huntProgress.candidates || 0).toLocaleString()}개 파일 · 발견 단서 ${huntProgress.detections || 0}개 · 정황 검토 준비 중`
       : huntProgress?.stage === "linux_discovery" ? `조사 대상 확인 · ${(huntProgress.entries || 0).toLocaleString()}개 경로`
-      : ["linux_investigate","ai_judgment"].includes(timelineTask?.action) ? c.investigation_stage
+      : ["linux_investigate","windows_investigate","ai_judgment"].includes(timelineTask?.action) ? c.investigation_stage
       : timelineTask?.label || c.investigation_result || "조사 결과를 기다리고 있습니다."
   };
   renderTimeline(s.visual_timeline, c);
@@ -144,7 +184,7 @@ function renderSnapshot() {
   const detachedOpen = $("evidence-files").querySelector("details")?.open;
   $("case-title").textContent = c.name;
   $("case-name").textContent = c.name;
-  $("case-id").textContent = c.id;
+  $("case-id").textContent = `${c.id} · ${(c.target_os || 'linux') === 'windows' ? 'Windows' : 'Linux'}`;
   $("case-question").textContent =
     c.question || "증거를 연결하고 조사를 시작하세요.";
   $("case-status").textContent = labels[c.status] || c.status;
@@ -160,29 +200,12 @@ function renderSnapshot() {
   $("coverage-label").textContent = `${s.summary.covered} / ${s.summary.total}`;
   $("coverage-progress").value = s.summary.covered;
   $("coverage-progress").max = s.summary.total || 1;
-  const investigation = s.hypothesis.filter((h) => h.contract === "linux-v1" && activeIds.has(h.evidence_id));
-  $("investigation-summary").hidden = !investigation.length;
-  if (investigation.length) {
-    const running = s.task.find((t) => activeIds.has(t.evidence_id) && t.status === "running");
-    const stage = running?.action === "linux_investigate" ? c.investigation_stage : running?.label;
-    $("investigation-summary").innerHTML = `<strong>${esc(stage || (c.status === "paused" ? "일시정지 · 저장한 단계에서 계속 가능" : c.investigation_result) || "침해조사 준비됨")}</strong><p>필수 조사 영역 ${investigation.length}개 · AI가 근거를 검토하고 필요한 도구를 실행합니다.</p>${s.report.length ? `<button class="secondary" data-download="${esc(s.report[s.report.length-1].id)}">최근 결과 패키지 내려받기 ↓</button>` : ""}`;
-  }
+  const investigation = s.hypothesis.filter((h) => ["linux-v1","windows-v1"].includes(h.contract) && activeIds.has(h.evidence_id));
+  $("investigation-summary").hidden = true;
   $("hypotheses").innerHTML = investigation.map((h) => `<article class="claim"><h3>${h.number}. ${esc(h.text)}</h3><span class="status">${esc(h.judgment)}${h.ai_candidate ? " · AI 검토 후보" : ""}</span><p>${esc(h.reasoning || "원문 조사와 검증을 기다리고 있습니다.")}</p><p>경쟁 설명: ${esc((h.competing_explanations || []).join(" / "))}</p><p>남은 확인: ${esc((h.remaining_checks || h.unavailable_materials || []).join(" / "))}</p><p>${(h.observation_ids || []).slice(0,6).map((id) => `<button data-ref="${esc(id)}">원문 근거 ${esc(id.slice(-6))}</button>`).join(" ")}</p></article>`).join("");
-  const judgments = s.judgments || [];
-  const findings = judgments.flatMap((j) => j.findings).filter((f) => f.timeline_role !== '반증됨');
-  $("judgment-results").hidden = !judgments.length;
-  $("messages").hidden = !!judgments.length && !s.message.some((m) => !m.automatic && m.created_at > judgments.at(-1).created_at);
-  $("suggestions").hidden = !!judgments.length;
-  const judgmentSignature = current + judgments.map((j) => j.id).join(",");
-  if (judgments.length && $("judgment-results").dataset.signature !== judgmentSignature) {
-    const levels = ["확인", "유력", "미확인"];
-    const badge = (level) => `<span class="judgment-badge level-${levels.indexOf(level)}">${esc(level)}</span>`;
-    $("judgment-results").innerHTML = `<h2>AI 조사 결과</h2>${judgments.map((j) => `<p class="judgment-summary">${esc(j.summary)}</p>`).join("")}<div class="judgment-counts">${levels.map((level) => `<span>${badge(level)} <strong>${findings.filter((f) => f.judgment === level).length}</strong></span>`).join("")}</div><p class="small-hint">개별 주장에 대한 AI 평가 · 정상성 별도 미검증 · 침해 건수 아님. 확인: 원문이 직접 뒷받침 · 유력: 정황상 가장 타당 · 미확인: 자료 부족 또는 상충</p>${levels.map((level) => {
-      const selected = findings.filter((f) => f.judgment === level);
-      return selected.length ? `<section class="judgment-group" aria-label="${level} 판단">${selected.map((f) => `<article class="judgment-card">${badge(level)}<h3>${esc(f.title)}</h3><details><summary>근거 · 판단 상세</summary><p><strong>판단 이유</strong></p><p>${esc(f.reason)}</p><p>${f.observation_ids.map((id) => `<button class="secondary" data-ref="${esc(id)}">원문 근거 ↗</button>`).join(" ") || "직접 연결할 근거 부족"}</p><p>다른 설명: ${esc(f.alternatives.join(" / ") || "별도 설명 없음")}</p><p>남은 확인: ${esc(f.remaining_checks.join(" / ") || "명시한 사실 범위에서 추가 검사 제안 없음")}</p></details></article>`).join("")}</section>` : "";
-    }).join("")}`;
-    $("judgment-results").dataset.signature = judgmentSignature;
-  }
+  $("judgment-results").hidden = true;
+  $("messages").hidden = false;
+  $("suggestions").hidden = s.message.some(m => m.role === 'user');
   const fileCard = (e) => {
     const detached = e.connected === false;
     const runningTask = s.task.find(
@@ -216,7 +239,7 @@ function renderSnapshot() {
       : ["running","pause_requested"].includes(c.status)
         ? "조사를 일시정지한 뒤 변경하세요."
         : "원본 파일과 조사 기록은 보존됩니다.";
-    return `<div class="file-card"><span class="file-icon">${esc(e.name.split(".").pop().toUpperCase().slice(0, 4))}</span><div class="file-info"><strong>${esc(e.name)}</strong><small>${e.segment_count > 1 ? `${e.segment_count}개 세그먼트 · ` : ""}${size(e.total_size || e.size)} · ${detached ? "연결 해제됨" : e.sha256 ? "무결성 확인됨" : "검증 대기"}</small>${progressText ? `<small class="file-progress" role="status">${esc(progressText)}</small>` : ""}<button class="evidence-action" data-${detached ? "reconnect" : "disconnect"}="${esc(e.id)}" ${locked ? "disabled" : ""} title="${reason}" aria-label="${esc(e.name)} ${detached ? "다시 연결" : "연결 해제"}">${detached ? "다시 연결" : "연결 해제"}</button>${!detached && running ? "<small>검증 중에는 해제할 수 없습니다.</small>" : ""}</div></div>`;
+    return `<div class="file-card"><span class="file-icon">${esc(e.name.split(".").pop().toUpperCase().slice(0, 4))}</span><div class="file-info"><strong>${esc(e.name)}</strong><small>${e.segment_count > 1 ? `${e.segment_count}개 세그먼트 · ` : ""}${size(e.total_size || e.size)} · ${detached ? "연결 해제됨" : e.sha256 ? "입력 해시 기록됨" : "검증 대기"}</small>${progressText ? `<small class="file-progress" role="status">${esc(progressText)}</small>` : ""}<button class="evidence-action" data-${detached ? "reconnect" : "disconnect"}="${esc(e.id)}" ${locked ? "disabled" : ""} title="${reason}" aria-label="${esc(e.name)} ${detached ? "다시 연결" : "연결 해제"}">${detached ? "다시 연결" : "연결 해제"}</button>${!detached && running ? "<small>검증 중에는 해제할 수 없습니다.</small>" : ""}</div></div>`;
   };
   $("evidence-files").innerHTML =
     (connected.map(fileCard).join("") ||
@@ -248,43 +271,41 @@ function renderSnapshot() {
     )
     .join("");
   const automaticMessages = s.message.filter((m) => m.automatic);
-  const latestAutomatic = automaticMessages.at(-1);
-  const latestIndex = latestAutomatic ? s.message.indexOf(latestAutomatic) : 0;
-  const previousMessages = s.message.slice(0, latestIndex);
+  const conversationMessages = s.message.filter((m) => !m.automatic);
   const messageCard = (m) => {
     const text = esc(m.text).replace(/OBSERVATION-[a-f0-9]{12}/g,
       (id) => `<button class="inline-reference" data-ref="${id}" title="${id}">근거 ↗</button>`);
-    return `<article class="message ${esc(m.role)} ${esc(m.mode || "")}"><div class="message-role">${m.role === "user" ? "나" : m.mode === "ai_candidate" ? "Frontier · AI 해석 후보" : "Frontier · 조사 안내"}</div>${text}${m.partial ? '<p class="small-hint">선택한 근거에 대한 AI 해석입니다. 미확인 범위는 조사 기록에 남습니다.</p>' : ""}</article>`;
+    return `<article class="message ${esc(m.role)} ${esc(m.mode || "")}"><div class="message-role">${m.role === "user" ? "나" : "Frontier"}${m.partial ? ' <span>부분 근거 답변</span>' : ''}</div>${text}</article>`;
   };
-  const history = previousMessages.length
-    ? `<details class="investigation-history"><summary>이전 대화와 조사 과정 ${previousMessages.length}개</summary>${previousMessages.map(messageCard).join("")}</details>` : "";
-  const messages = history + s.message.slice(latestIndex).map(messageCard).join("");
+  const history = automaticMessages.length
+    ? `<details class="investigation-history"><summary>에이전트 작업 기록 ${automaticMessages.length}</summary>${automaticMessages.map(messageCard).join("")}</details>` : "";
+  const messages = conversationMessages.map(messageCard).join("") + history;
   const messageSignature = current + connected.length + messages;
   if ($("messages").dataset.signature !== messageSignature) {
+    const nearBottom = $("messages").scrollHeight - $("messages").scrollTop - $("messages").clientHeight < 80;
     $("messages").innerHTML =
       messages ||
-      `<article class="message empty"><div class="message-role">Frontier</div>${connected.length ? "조사를 실행하면 증거의 무결성과 기본 기록부터 확인합니다. 확인할 내용을 질문으로 남겨주세요." : "증거를 연결하면 조사를 시작할 수 있습니다. 오른쪽 ＋ 버튼에서 파일을 선택하세요."}</article>`;
+      `<article class="message empty"><div class="agent-orb">f</div><h3>함께 조사해요.</h3><p>${connected.length ? "궁금한 단서를 짚거나 다음 조사 방향을 알려주세요." : "상단 증거 관리에서 파일을 연결하세요."}</p></article>`;
     $("messages").dataset.signature = messageSignature;
-    $("messages").scrollTop = $("messages").scrollHeight;
+    if (nearBottom) $("messages").scrollTop = $("messages").scrollHeight;
   }
   $("claims").innerHTML = s.claim.length ? `<details class="investigation-history"><summary>이전 해석 기록 ${s.claim.length}개</summary>${s.claim.map((cl) => `<article class="claim"><h3>${esc(cl.text)}</h3><p>${esc(cl.uncertainty)}</p><p>대안: ${esc((cl.alternatives || []).join(" / "))}</p><p>${cl.observation_ids.map((id) => `<button data-ref="${esc(id)}">원문 근거 ↗</button>`).join(" ")}</p></article>`).join("")}</details>` : '<p class="small-hint">조사가 진행되면 근거를 바탕으로 AI가 자동 판단합니다.</p>';
   $("report-history").innerHTML = s.report
     .map(
       (r, i) =>
-        `<button data-download="${esc(r.id)}">보고서 ${i + 1} · 미확인 범위 ${r.gap_count} ↓</button>`,
+        `<button data-report="${esc(r.id)}">스냅샷 ${i + 1} · 미확인 범위 ${r.gap_count}${r.reader_contract ? '' : ' · 이전 형식 원문 ZIP · 제한 배포'}</button>`,
     )
     .join("");
+  const savedReport = s.report.find(r => r.id === selectedReport);
+  if (savedReport && reportCase === current)
+    $("report-snapshot-status").textContent = `저장된 동일 스냅샷 · ${savedReport.report_id}${savedReport.snapshot?.scope_revision !== s.report_scope_revision ? ' · 이후 조사 상태 또는 결과가 갱신됨' : ''}`;
 }
 async function switchTab(name) {
   tabName = name;
-  document.querySelectorAll("[data-tab]").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tab === name);
-    b.setAttribute("aria-current", b.dataset.tab === name ? "page" : "false");
-  });
-  for (const n of ["investigate", "evidence", "report"])
-    $("panel-" + n).hidden = n !== name;
-  if (name === "evidence") await loadObservations();
-  if (name === "report") await loadReport();
+  if (name === "evidence") {
+    if (!$("evidence-drawer").open) $("evidence-drawer").showModal();
+    await loadObservations();
+  } else if (name === "report") await switchCompanion('report');
 }
 async function loadObservations() {
   const result = await api(
@@ -294,21 +315,22 @@ async function loadObservations() {
     result.items
       .map(
         (o) =>
-          `<details class="observation" id="${esc(o.id)}"><summary><time>${esc(o.timestamp ? new Date(o.timestamp).toLocaleString("ko-KR") : "시간 정보 없음")}</time><strong>${esc(evidenceTypes[o.type] || o.type)}</strong><span class="location">${esc(o.source_location)}</span></summary><pre>${esc(JSON.stringify(o.fields, null, 2))}</pre>${o.fields.artifact_path ? `<button class="secondary" data-source="${esc(o.id)}">해시 검증된 추출 원문 ↓</button>` : ""}<p class="meta">${esc(o.id)}<br>증거 ${esc(o.evidence_id)}<br>도구 기록 ${esc(o.receipt_id)}</p></details>`,
+          `<details class="observation" id="${esc(o.id)}"><summary><time>${esc(o.timestamp ? new Date(o.timestamp).toLocaleString("ko-KR") : "대표 시각 미기록 · 필드 확인")}</time><strong>${esc(evidenceTypes[o.type] || o.type)}</strong><span class="location">${esc(o.source_location)}</span></summary><pre>${esc(o.fields_display_json ?? JSON.stringify(o.fields, null, 2))}</pre>${o.fields.artifact_path ? `<button class="secondary" data-source="${esc(o.id)}">해시 검증된 추출 원문 ↓</button>` : ""}<p class="meta">${esc(o.id)}<br>증거 ${esc(o.evidence_id)}<br>도구 기록 ${esc(o.receipt_id)}</p></details>`,
       )
       .join("") ||
     '<div class="empty-state">표시할 관측 기록이 없습니다. 조사를 실행하거나 검색어를 바꿔보세요.</div>';
   $("more-observations").hidden = searchOffset + 100 >= result.total;
 }
-async function loadReport() {
-  const response = await api(
-    `/cases/${current}/report-preview`,
-    "GET",
-    undefined,
-    true,
-  );
-  $("report-preview").srcdoc = await response.text();
-}
+$("reader-executive").onclick = () => perform(async () => { reportReader = 'executive'; await loadReport(); });
+$("reader-analyst").onclick = () => perform(async () => { reportReader = 'analyst'; await loadReport(); });
+$("download-word").onclick = () => perform(async () => {
+  if (!selectedReport) { toast('먼저 새 스냅샷을 저장하세요.'); return; }
+  await download(selectedReport, reportReader);
+});
+$("download-raw").onclick = () => perform(async () => {
+  if (!selectedReport) { toast('먼저 새 스냅샷을 저장하세요.'); return; }
+  await download(selectedReport);
+});
 function openCaseDialog() {
   $("case-form").reset();
   $("case-dialog").showModal();
@@ -323,6 +345,7 @@ $("case-form").onsubmit = (e) => {
       name: $("name").value.trim(),
       question: $("question").value.trim(),
       profile: $("profile").value,
+      target_os: $("target-os").value,
     });
     $("case-dialog").close();
     await selectCase(c.id);
@@ -349,8 +372,9 @@ $("example-case").onclick = () =>
   });
 $("run").onclick = () =>
   perform(async () => {
+    const state = requireCurrentSnapshot();
     await api(
-      `/cases/${current}/${["running","pause_requested"].includes(snapshot.case.status) ? "pause" : "start"}`,
+      `/cases/${state.case.id}/${["running","pause_requested"].includes(state.case.status) ? "pause" : "start"}`,
       "POST",
     );
     await refresh();
@@ -358,8 +382,10 @@ $("run").onclick = () =>
   });
 $("add-evidence").onclick = () =>
   perform(async () => {
+    const state = requireCurrentSnapshot();
     const files = await api("/evidence-files");
-    const registered = new Set(snapshot.evidence.map((e) => e.path));
+    if (state.case.id !== current || !snapshot) return;
+    const registered = new Set(state.evidence.map((e) => e.path));
     $("available-files").innerHTML =
       files
         .filter((f) => !registered.has(f.path))
@@ -396,27 +422,71 @@ $("message").onkeydown = (e) => {
     $("chat-form").requestSubmit();
   }
 };
+let loadedProvider = {};
+$("secondary-enabled").onchange = () => {
+  $("secondary-fields").disabled = !$("secondary-enabled").checked;
+};
 function providerForm() {
+  const twoModels = $("secondary-enabled").checked;
   return {
     protocol: $("protocol").value,
     base_url: $("base-url").value,
     model: $("model").value,
     falsifier_model: $("falsifier-model").value,
     trusted_lan: $("trusted-lan").checked,
+    investigator: "native",
+    investigation_strategy: $("investigation-strategy").value,
+    review_concurrency: Number($("review-concurrency").value),
+    think: $("think-mode").value,
+    structured_output: $("structured-output").value,
+    num_ctx: Number($("investigation-context").value),
+    num_predict: Number($("investigation-output").value),
+    assistant_num_ctx: Number($("assistant-context").value),
+    assistant_num_predict: Number($("assistant-output").value),
+    temperature: Number($("model-temperature").value),
+    model_digest: loadedProvider.model_digest ?? null,
+    secondary: twoModels ? {
+      ...(loadedProvider.secondary || {}),
+      protocol: $("secondary-protocol").value,
+      base_url: $("secondary-url").value,
+      model: $("secondary-model").value,
+      trusted_lan: $("secondary-trusted").checked,
+      think: $("secondary-protocol").value === "ollama" ? (loadedProvider.secondary?.think ?? "off") : "off",
+    } : null,
+    role_routes: twoModels ? Object.fromEntries(
+      [...document.querySelectorAll("[data-model-role]")].map(x => [x.dataset.modelRole, x.checked ? "secondary" : "primary"])
+    ) : {},
   };
 }
 async function updateConnection() {
   const c = await api("/settings");
-  $("model-status").textContent = c.model ? "모델 설정됨" : "설정 필요";
+  $("model-status").textContent = c.secondary?.model ? "모델 2개 설정됨" : c.model ? "모델 설정됨" : "설정 필요";
 }
 $("settings").onclick = () =>
   perform(async () => {
     const c = await api("/settings");
+    loadedProvider = c;
     $("protocol").value = c.protocol;
     $("base-url").value = c.base_url;
     $("model").value = c.model;
     $("falsifier-model").value = c.falsifier_model;
     $("trusted-lan").checked = c.trusted_lan;
+    $("investigation-strategy").value = c.investigation_strategy ?? "guided";
+    $("review-concurrency").value = c.review_concurrency ?? 1;
+    $("think-mode").value = c.think ?? "off";
+    $("structured-output").value = c.structured_output ?? "json_schema";
+    $("investigation-context").value = c.num_ctx ?? 32768;
+    $("investigation-output").value = c.num_predict ?? 4000;
+    $("assistant-context").value = c.assistant_num_ctx ?? 16384;
+    $("assistant-output").value = c.assistant_num_predict ?? 2500;
+    $("model-temperature").value = c.temperature ?? 0.1;
+    $("secondary-enabled").checked = !!c.secondary;
+    $("secondary-fields").disabled = !c.secondary;
+    $("secondary-protocol").value = c.secondary?.protocol ?? "ollama";
+    $("secondary-url").value = c.secondary?.base_url ?? "";
+    $("secondary-model").value = c.secondary?.model ?? "";
+    $("secondary-trusted").checked = !!c.secondary?.trusted_lan;
+    for (const x of document.querySelectorAll("[data-model-role]")) x.checked = c.role_routes?.[x.dataset.modelRole] === "secondary";
     $("probe-result").textContent = "";
     $("settings-dialog").showModal();
   });
@@ -431,6 +501,7 @@ $("probe").onclick = () =>
       $("probe-result").textContent = r.models.length
         ? `${r.models.length}개 모델 확인 · ${r.models.join(", ")}`
         : "연결되었지만 설치된 모델이 없습니다.";
+      if (r.secondary_models) $("probe-result").textContent += ` / 두 번째 서버: ${r.secondary_models.join(", ") || "설치 모델 없음"}`;
       if (!$("model").value && r.models.length) $("model").value = r.models[0];
     } finally {
       $("probe").disabled = false;
@@ -459,28 +530,32 @@ $("save-report").onclick = () =>
     $("save-report").disabled = true;
     try {
       const r = await api(`/cases/${current}/reports`, "POST");
+      selectedReport = r.id; reportCase = current;
       await refresh();
-      await download(r.id);
-      toast("보고서와 근거 기록, 체크섬을 저장했습니다.");
+      await loadReport();
+      await download(r.id, reportReader);
+      toast("같은 스냅샷의 임원용·분석가용 HTML·Word를 저장했습니다.");
     } finally {
       $("save-report").disabled = false;
     }
   });
-async function download(id) {
+async function download(id, reader = null) {
+  const route = reader ? `/reports/${encodeURIComponent(id)}/files/${reader}.docx` : `/reports/${encodeURIComponent(id)}/download`;
+  const filename = reader ? `frontier-${reader}.docx` : 'frontier-restricted-evidence.zip';
   if (!token) {
     const link = document.createElement("a");
-    link.href = `/api/reports/${encodeURIComponent(id)}/download`;
-    link.download = "frontier-report.zip";
+    link.href = '/api' + route;
+    link.download = filename;
     document.body.append(link);
     link.click();
     link.remove();
     return;
   }
-  const response = await api(`/reports/${id}/download`, "GET", undefined, true);
+  const response = await api(route, "GET", undefined, true);
   const url = URL.createObjectURL(await response.blob());
   const a = document.createElement("a");
   a.href = url;
-  a.download = "frontier-report.zip";
+  a.download = filename;
   document.body.append(a);
   a.click();
   a.remove();
@@ -500,6 +575,8 @@ document.addEventListener("click", (e) => {
     if (b.dataset.case) await selectCase(b.dataset.case);
     if (b.dataset.tab) await switchTab(b.dataset.tab);
     if (b.dataset.question) {
+      if ($("scenario-dialog").open) $("scenario-dialog").close();
+      await switchCompanion('chat');
       $("message").value = b.dataset.question;
       $("message").focus();
     }
@@ -541,6 +618,12 @@ document.addEventListener("click", (e) => {
       }
     }
     if (b.dataset.download) await download(b.dataset.download);
+    if (b.dataset.report) {
+      const r = requireCurrentSnapshot().report.find(r => r.id === b.dataset.report);
+      if (!r) throw Error('선택한 보고서가 현재 사건에 없습니다.');
+      if (!r.reader_contract) { await download(r.id); return; }
+      selectedReport = r.id; reportCase = current; await loadReport();
+    }
     if (b.dataset.source) {
       if (!token) {
         const link = document.createElement("a");
@@ -572,9 +655,14 @@ async function init() {
 perform(init);
 setInterval(() => { if (snapshot && !document.hidden) renderInvestigationProgress(snapshot, progressReceivedAt); }, 1000);
 setInterval(() => {
-  if (current && !document.hidden && !busy)
+  if (current && !document.hidden && !busy && !pollInFlight) {
+    pollInFlight = true;
     perform(async () => {
-      await refresh();
-      if (["running","pause_requested"].includes(snapshot.case.status)) await listCases();
+      try {
+      const state = await refresh();
+      if (state && state === snapshot && state.case.id === current && ["running","pause_requested"].includes(state.case.status))
+        await listCases();
+      } finally { pollInFlight = false; }
     });
+  }
 }, 3500);

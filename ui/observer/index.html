@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Frontier · 질문 중심 조사실</title>
+  <link rel="stylesheet" href="/observer.css">
+  <script src="/state.js" defer></script><script src="/renderer.js" defer></script><script src="/observer.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#questions">질문 목록으로 이동</a>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true">f</span>frontier <span class="edition">OBSERVER</span></div>
+  <div class="context"><span id="mode" class="tag">불러오는 중</span><span id="case-name">질문 중심 조사실</span><span id="run-name" class="muted"></span></div>
+  <button id="reports-open" type="button">보고서 <span id="report-count">—</span></button>
+</header>
+<div class="subbar"><span id="connection">보존 데이터 연결 중</span><span id="basis">판단 기준 시점 —</span><button id="refresh" type="button">재동기화</button></div>
+<main>
+  <div id="critical" class="critical" role="status" aria-live="polite" hidden></div>
+  <section class="judgment-strip" aria-labelledby="summary-title">
+    <div><span class="eyebrow">JUDGMENT / SCOPE</span><h1 id="summary-title">현재 판단 요약</h1></div>
+    <div id="summary"></div>
+    <button id="pin" type="button" aria-pressed="false">이 스냅샷 고정</button>
+  </section>
+  <div class="workspace" id="workspace">
+    <aside class="guide" aria-labelledby="guide-title">
+      <div class="panel-heading"><h2 id="guide-title">조사 안내</h2><button id="guide-size" type="button" aria-label="안내 영역 크기 전환">집중 모드</button></div>
+      <div class="guide-intro"><div class="moa" role="img" aria-label="모아, 정적 조사 안내자"><i></i><i></i><span></span></div><div><strong>모아</strong><p>원장이 말하는 만큼만.</p></div><button id="hide-moa" type="button" aria-pressed="false">숨김</button></div>
+      <details class="renderer-settings"><summary>안내자 표시 설정</summary><p id="renderer-status" class="note">정적 안내자 · Live2D 모델 미연결</p><label><input id="motion" type="checkbox"> 동작 허용 (모델 연결 후)</label><p class="note">모션 감소 설정과 숨김 탭에서는 동작을 중지합니다. 조사 상태·실패 표시는 계속 유지됩니다.</p></details>
+      <div id="narrative" class="bubble"></div>
+      <section class="work-now"><span class="eyebrow">GLOBAL ACTIVITY</span><h3>전체 조사의 작업</h3><p class="note">보고 있는 질문과 실행 중인 작업은 다릅니다.</p><div id="activity"></div></section>
+      <details id="work-history"><summary>실제 작업 이력</summary><label>상태 <select id="activity-filter"><option value="all">전체</option><option value="active">대기·실행</option><option value="failed">실패</option><option value="finished">종료</option></select></label><div id="history" class="history" data-scroll="history"></div></details>
+      <section><h3>마지막 판단 변경</h3><p id="last-progress" class="note"></p><div id="changes"></div></section>
+      <details><summary>질문 찾기</summary><p class="note">읽기 전용 화면입니다. 입력은 질문 검색에만 쓰이며, 사용자 진술·조사 지시를 전송하거나 판단에 반영하지 않습니다.</p><label for="question-filter">질문 검색</label><input id="question-filter" type="search" placeholder="질문에 포함된 내용" autocomplete="off"><p class="note">새 조사 요청과 모델 답변은 기존 조사 화면에서만 가능합니다.</p></details>
+    </aside>
+    <section class="investigation" aria-labelledby="investigation-title">
+      <div class="panel-heading"><div><span class="eyebrow">QUESTIONS FIRST</span><h2 id="investigation-title">어디까지 답했나요?</h2></div><span id="question-count" class="muted"></span></div>
+      <div class="question-layout">
+        <nav id="questions" class="question-list" aria-label="전체 조사 질문" data-scroll="questions"></nav>
+        <div class="question-body" data-scroll="question-body"><div id="question-detail"></div><section id="selection" class="selection" aria-label="선택 항목 상세"></section></div>
+      </div>
+    </section>
+  </div>
+  <section class="timeline-section" aria-labelledby="timeline-title">
+    <div class="panel-heading"><div><span class="eyebrow">EVIDENCE / TIME</span><h2 id="timeline-title">근거 기반 사건 시간축</h2></div><button id="timeline-layout" type="button" aria-pressed="false">목록으로 보기</button></div>
+    <p class="note">기록된 절대 시각 기준 · 시간 간격은 비례하지 않음 · 순서가 인과관계를 뜻하지 않습니다. 선택한 질문의 연결 원문만 표시합니다.</p>
+    <div id="timeline" class="timeline" data-scroll="timeline"></div>
+    <details class="uncertain-time" open><summary id="uncertain-count">시각 미상 · 절대 시각 비교 불가</summary><div id="uncertain"></div></details>
+  </section>
+  <footer><span id="revision">스냅샷 —</span><span>읽기 전용 · 보기 동작에 의한 모델 호출 없음 · 외부 자원 없음</span></footer>
+</main>
+<dialog id="reports-dialog" aria-labelledby="reports-title"><div class="panel-heading"><h2 id="reports-title">보존된 보고서</h2><button id="reports-close" type="button">닫기</button></div><div id="reports"></div></dialog>
+<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
+</body>
+</html>

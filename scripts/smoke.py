@@ -28,5 +28,5 @@ assert state['summary']=={'total':6,'covered':5,'gaps':1},state['summary']
 assert state['observation_count']==6,state['observation_count']
 report=json.loads(request(f'/api/cases/{id}/reports','POST'))
 with zipfile.ZipFile(io.BytesIO(request('/api/reports/'+report['id']+'/download'))) as z:
-    assert {'report.html','report.json','manifest.json','SHA256SUMS'}==set(z.namelist())
+    assert {'report.html','report.json','manifest.json','SHA256SUMS','executive.html','executive.docx','analyst.html','analyst.docx'}==set(z.namelist())
 print(json.dumps({'status':'passed','case_id':id,'coverage':state['summary'],'observations':state['observation_count'],'report':'valid ZIP'},ensure_ascii=False))

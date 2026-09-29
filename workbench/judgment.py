@@ -5,6 +5,7 @@ import hashlib
 import json
 from .investigation import evidence_pack
 from .provider import Provider
+from .investigator import consult
 
 LEVELS = ('확인', '유력', '미확인')
 
@@ -61,7 +62,7 @@ def current(controller, case_id, source_observations=None):
 
 
 def finish(controller, case_id, evidence, task):
-    if task.get('analysis_version')=='linux-hunt-2':
+    if task.get('analysis_version') in ('linux-hunt-2','windows-hunt-1'):
         from .dossiers import finish as review_dossiers
         return review_dossiers(controller,case_id,evidence,task)
     store = controller.store
@@ -78,7 +79,7 @@ def finish(controller, case_id, evidence, task):
     try:
         preferred = [oid for job in reversed(store.list('investigation_job', case_id))
                      if job.get('status') == 'ingested' for oid in job.get('observation_ids', [])][:12]
-        pack = evidence_pack(controller, case_id, store.get(case_id)['question'], preferred)
+        pack = evidence_pack(controller, case_id, store.get(case_id)['question'], preferred,evidence_id=evidence['id'])
         valid = {o['id'] for o in controller.active_observations(case_id) if o['evidence_id'] == evidence['id']}
         pack['observations'] = [o for o in pack['observations'] if o['id'] in valid]
         included = {o['id'] for o in pack['observations']}
@@ -90,9 +91,9 @@ def finish(controller, case_id, evidence, task):
         store.add('judgment_attempt', case_id, task_id=task['id'], evidence_id=evidence['id'], generation=generation, included_ids=sorted(included))
         store.update(case_id, investigation_stage='AI가 확인·유력·미확인으로 판단 중')
         try:
-            output, receipt = Provider(config[-1]['provider']).generate(
+            output, receipt = consult(config[-1]['provider'],
                 '수집된 실제 근거와 대안 검토를 종합하여 최종 판단하세요. 확인·유력·미확인별 핵심 결과와 이유를 작성하세요. '
-                '사람의 승인 없이 결과를 제공하며 유력한 판단도 포함합니다. 확인은 구체적인 사실의 범위에 한정하세요.', pack, role='judgment')
+                '사람의 승인 없이 결과를 제공하며 유력한 판단도 포함합니다. 확인은 구체적인 사실의 범위에 한정하세요.', pack, role='judgment',provider_factory=Provider)
             for finding in output['findings']:
                 if not set(finding['observation_ids']).issubset(included): raise ValueError('AI 판단이 제공하지 않은 근거를 참조했습니다.')
                 if finding['judgment'] != '미확인' and not finding['observation_ids']: raise ValueError('확인·유력 판단에는 실제 근거가 필요합니다.')

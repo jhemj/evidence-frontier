@@ -7,9 +7,13 @@ from importlib.metadata import version
 
 
 def scan(path,limit=5000):
-    from dissect.target import Target
+    from .image_target import open_target
+    with open_target(path, apply=False) as target:
+        return _scan(path, limit, target)
+
+
+def _scan(path, limit, target):
     from dissect.target.filesystems.xfs import XfsFilesystem
-    target=Target.open(str(path),apply=False)
     target.disks.apply()
     events=[];scopes=[];found=False
     for vol in target.volumes:

@@ -2,7 +2,7 @@
 
 **로컬 AI 포렌식 워크벤치 · Windows / Ubuntu**
 
-증거를 연결하고 **침해조사 시작**을 누르면 Linux 로그·계정·설정·파일 내용을 수집하고, 로컬 AI가 추가 도구를 선택해 조사합니다. LangGraph가 계획·실행·대조검사·결과 저장을 이어갑니다. 질문 입력은 선택 사항입니다. [설계와 지원 범위](docs/LANGGRAPH_DECISION.md)를 확인하세요.
+새 사건에서 **증거의 운영체제 → Linux / Windows**를 선택하고 증거를 연결합니다. **침해조사 시작**을 누르면 OS별 수집기를 사용하고, 로컬 AI가 지원되는 추가 도구를 선택해 조사합니다. LangGraph가 계획·실행·대조검사·결과 저장을 이어갑니다. 질문 입력은 선택 사항입니다. Windows는 EVTX·Task XML·현재 Defender 예외·SRUM과 검증된 정규화 안전본을 지원하는 제한형 구현입니다. [Windows 지원 범위](docs/WINDOWS_HARNESS.md), [설계](docs/LANGGRAPH_DECISION.md)를 확인하세요.
 
 조사 화면의 **증거 타임라인**에서 핵심 근거와 확인·유력·미확인 판단을 시간순으로 볼 수 있습니다. AI가 반증으로 해석을 철회하면 변경 이유와 이력을 남깁니다. 원문 스트리밍 탐지, 단서별 검토와 실제 후속 검사 범위는 [탐지·타임라인 구현 계약](docs/HUNTING_AND_TIMELINE.md)을 참고하세요.
 
@@ -53,6 +53,8 @@ EVIDENCE_PATH="D:/Forensic Evidence"
 
 UI의 새 사건 → 증거 ＋ → 파일 선택 → 조사 시작. E01 분할 이미지는 같은 폴더에 모두 두고 첫 번째 `.E01`을 선택합니다. 이미지 전체를 웹으로 업로드하거나 복제하지 않습니다. 모든 segment를 읽을 수 있어야 합니다. Ubuntu에서 worker UID 10001에 파일 읽기와 상위 폴더 탐색 권한이 필요합니다.
 
+운영체제 선택은 **조사 대상 증거의 OS**이며 이 PC의 OS가 아닙니다. 기존 사건은 Linux 경로를 유지합니다. OS를 잘못 선택했다면 새 사건을 만드세요. 기존 기록을 다른 파서로 묵시적으로 재해석하지 않습니다. Windows ZIP 입력은 임의 압축파일이 아니라 manifest·SHA-256·스키마 검사를 통과하는 정규화 안전본만 허용합니다.
+
 증거 카드의 **연결 해제**와 **다시 연결**로 조사 대상을 관리할 수 있습니다. 원본과 과거 기록은 보존하며 새 분석과 보고서에서만 제외합니다. 진행 중인 읽기 작업은 완료 후 해제할 수 있습니다. [연결 동작과 대용량 XFS 조사 범위](docs/EVIDENCE-CONNECTION.md)를 확인하세요.
 
 원본 폴더는 worker만 `read_only`로 마운트하며 controller에는 마운트하지 않습니다. Windows/Ubuntu 공통으로 사건 DB는 Docker named volume에 저장해 SQLite/NTFS 경로 차이를 피합니다. 이는 원본 저장 매체에 대한 하드웨어 쓰기 방지나 chain-of-custody 절차를 대신하지 않습니다.
@@ -67,6 +69,8 @@ UI의 새 사건 → 증거 ＋ → 파일 선택 → 조사 시작. E01 분할 
 
 **연결 및 모델 확인**을 누른 후 설치된 모델 이름을 선택합니다. 모델 파일은 배포물에 포함하지 않으며 자동으로 대용량 모델을 다운로드하지 않습니다. 공유 지시서의 모델 후보는 실제 설치명과 별개이므로 검증되지 않은 태그를 기본값으로 지정하지 않았습니다.
 
+**조사 방식·모델 상세 설정**에서 가설 중심 조사 전략, Ollama 추론 모드, 역할별 문맥·출력 한도를 조절할 수 있습니다. 기본 추론 모드는 기존처럼 끄기이며 지원 여부를 확인한 뒤 변경하세요. 조사 절차와 설정은 사건의 실행 버전에 고정됩니다. 진행 중에는 설정을 바꿀 수 없으며 변경 후에는 새 사건을 사용합니다. [조사자 구조와 근거 선택](docs/INVESTIGATOR_STRATEGY.md)을 참고하세요. 현재 조사자는 Native이며 Hermes를 설치하거나 실행하지 않습니다.
+
 대형 E01의 작업자 메모리 기본값은 4 GiB입니다. `.env`의 `WORKER_MEMORY`로 조정할 수 있습니다. 조사 결과와 추출 원문은 별도 Docker volume에 저장됩니다.
 
 큰 근거 팩의 로컬 AI 응답은 수 분 걸릴 수 있습니다. `.env`의 `MODEL_TIMEOUT`은 기본 300초이며 30~600초로 제한합니다. 단서별 모델 오류는 최대 2회 시도하며 실패·한도 중단을 원장에 남깁니다.
@@ -79,9 +83,11 @@ Windows Docker Desktop은 호스트 별칭을 지원하며 Ubuntu Compose에는 
 
 조사가 끝나면 AI가 중간 해석을 종합해 **확인 / 유력 / 미확인**으로 판단하고 결과와 보고서를 자동 생성합니다. 사용자의 승인·제외 절차는 필요 없습니다. 확인은 원문이 직접 뒷받침하는 구체적 사실, 유력은 정황상 가장 타당한 설명, 미확인은 자료 부족 또는 상충 상태입니다. 각 판단의 이유·근거·대안 설명·남은 검사를 함께 보존하며 유력한 결과도 보고서에 포함합니다.
 
-기본 ZIP: `report.html`, `report.json`, `manifest.json`, `SHA256SUMS`. Linux 내용 조사에는 `TIMELINE.csv`, `IOC_LIST.csv`, `HYPOTHESES.json`, `EVIDENCE_MANIFEST.csv`, `REPORT_EVIDENCE_MAP.csv`, `RESULT_REVISION.json`과 해시 검증한 추출 원문을 추가합니다. 외부 JS·폰트 없이 오프라인으로 열 수 있습니다. 사용자 양식은 `templates/report.html`로 교체하며 데이터 계약은 [보고서 계약](docs/REPORT_CONTRACT.md)에 있습니다.
+같은 불변 스냅샷에서 **임원용 요약·분석가용 상세를 각각 HTML·Word**로 생성합니다. 분석가용은 소스별 보존·파싱 범위, 반대 근거, 미확인 사항과 원문 위치를 포함합니다. 제한 배포 ZIP에는 `report.json`, manifest·SHA256SUMS와 수집 결과가 있는 경우 `TIMELINE.csv`, `IOC_LIST.csv`, `HYPOTHESES.json`, `EVIDENCE_MANIFEST.csv`, `REPORT_EVIDENCE_MAP.csv`, `RESULT_REVISION.json`, 해시 검증한 보존 산출물이 포함됩니다. Windows 정규화 산출물 해시는 원본 EVTX/디스크 해시와 다르며 별도로 표시합니다. 외부 JS·폰트 없이 열 수 있습니다. [보고서 계약](docs/REPORT_CONTRACT.md)을 참고하세요.
 
 공개 저장소에는 프로그램과 합성 예제, 일반적인 사용 문서를 포함합니다. 실제 증거, 사건별 결과 ZIP, 상세 분석·검토 보고서, 로컬 설정과 API 키는 게시하지 않습니다. `artifacts/`, `data/`, `evidence/`, `reports/`, `.env`는 Git 추적에서 제외됩니다.
+
+별도 질문 중심 읽기 전용 화면은 `ui/observer/`에 있습니다. 정적 안내자, 질문·주장·검사·원문 상세, 사건 시간축, 정정 및 보고서 최신성을 같은 스냅샷에서 표시합니다. Live2D 자산이나 추가 모델은 포함하지 않습니다. [관찰 화면 계약](docs/OBSERVER_UI.md)을 참고하세요.
 
 ## 종료와 업데이트
 

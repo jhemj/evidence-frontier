@@ -52,7 +52,20 @@ def tool_scope(call):
 
 
 def fingerprint_scope(call):
-    return {k:v for k,v in tool_scope(call).items() if k != 'reason'}
+    scope = tool_scope(call)
+    tool = scope.get('tool')
+    # static_file and archive_list always inspect the selected object from
+    # byte zero up to their own fixed safety cap; caller byte ranges therefore
+    # do not change the operation and must not create duplicate jobs.  The
+    # identity selectors remain part of the scope (same path on another
+    # partition/inode is a different object).
+    if tool in ('static_file', 'archive_list'):
+        return {k: scope.get(k) for k in ('tool', 'path', 'partition_offset', 'inode')}
+    if tool == 'read_file':
+        # These are the only parameters consumed by the image file reader.
+        # Search limits/account/query/source offsets do not change this read.
+        return {k: scope.get(k) for k in ('tool','path','partition_offset','inode','byte_offset','byte_length')}
+    return {k:v for k,v in scope.items() if k != 'reason'}
 
 
 def time_value(value):
@@ -67,6 +80,8 @@ def source_origin(observation):
     # Conservatively treat repeated extraction and parsed/raw copies of one file
     # as ONE origin. This does not assert independence of different files.
     identity = [observation.get('evidence_id'), f.get('partition_offset'), f.get('path'), f.get('inode')]
+    if observation.get('type','').startswith('windows_'):
+        identity += [f.get('os_instance'),f.get('volume_id'),f.get('snapshot_id'),f.get('source_path')]
     if not f.get('path'):identity += [observation.get('source_location')]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
 
@@ -172,7 +187,12 @@ def search(run, image, manifest, request):
                     f=item['fields'];p=f.get('path','')
                     if request.partition_offset is not None and f.get('partition_offset')!=request.partition_offset:item=None
                     if request.inode is not None and f.get('inode')!=request.inode:item=None
-                    if request.path and not (p==request.path or p.startswith(request.path.rstrip('/')+'/')):item=None
+                    if request.path:
+                        if manifest.get('platform')=='windows':
+                            from .evidence_semantics import windows_path
+                            candidate,prefix=windows_path(p),windows_path(request.path).rstrip('\\')
+                            if not (candidate==prefix or candidate.startswith(prefix+'\\')):item=None
+                        elif not (p==request.path or p.startswith(request.path.rstrip('/')+'/')):item=None
                     if item and request.account and not re.search(r'(?<![\w.-])'+re.escape(request.account)+r'(?![\w.-])',text):item=None
                     if item and (lower or upper):
                         try:t=time_value(item.get('timestamp'))
@@ -195,9 +215,29 @@ def search(run, image, manifest, request):
             if next_cursor:break
         fi+=1;offset=line_number=watermark=0
     complete=not next_cursor and not clipped
+    has_more=bool(next_cursor)
+    remaining_matches_unknown=bool(next_cursor or clipped)
+    # Give callers an exact, copyable continuation request.  In particular,
+    # preserve the page limit that is part of the cursor binding; a fresh
+    # default limit would otherwise invalidate the cursor or change paging
+    # semantics.  The cursor remains the authoritative position and all
+    # evidence/time/path/account selectors are carried forward verbatim.
+    continuation_request = None
+    if next_cursor:
+        continuation_request = request.model_dump()
+        continuation_request['cursor'] = next_cursor
     return {'tool':'search','query':request.query,'path':request.path,'observations':observations,
         'matches':matched,'matches_scope':'this page scan only; not total matches', 'returned':len(observations),
         'omitted_matches':max(0,matched-len(observations)), 'next_cursor':next_cursor,
+        'continuation_request': continuation_request,
+        'continuation_request_semantics': ('Copy continuation_request verbatim for the next page; do not replace '
+                                           'its cursor or limit with fresh defaults. It preserves the exact search '
+                                           'filters and evidence binding.')
+        if next_cursor else None,
+        'has_more':has_more,
+        'remaining_matches_unknown':remaining_matches_unknown,
+        'omission_count_basis':('at least omitted_matches; total remaining matches unknown'
+                                if remaining_matches_unknown else 'exact within the fully scanned scope'),
         'complete':complete,'truncated':not complete,'status':'partial' if not complete else 'covered' if observations else 'covered_zero',
         'raw_files':raw_files,'raw_bytes':examined,'unknown_time_excluded':unknown_time,'long_line_fragments':clipped,
         'query_semantics':'case-insensitive literal substring; spaces are literal, no AND/OR/regex',

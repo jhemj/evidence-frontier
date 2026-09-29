@@ -19,7 +19,8 @@ def test_multiroot_read_requires_selection_and_checks_inode(tmp_path,monkeypatch
             v=self.volume
             return SimpleNamespace(open=lambda:io.BytesIO(v.data),lstat=lambda:SimpleNamespace(st_mode=stat.S_IFREG|0o644,
                 st_ino=v.inode,st_size=len(v.data),st_uid=0,st_gid=0,st_mtime=0,st_ctime=0,st_atime=0))
-    monkeypatch.setitem(sys.modules,'dissect.target',SimpleNamespace(Target=SimpleNamespace(open=lambda *a,**kw:target)))
+    from contextlib import nullcontext
+    monkeypatch.setattr('workbench.image_target.open_target',lambda *a,**kw:nullcontext(target))
     monkeypatch.setitem(sys.modules,'dissect.target.filesystems.xfs',SimpleNamespace(XfsFilesystem=FS))
     monkeypatch.setitem(sys.modules,'dissect.target.filesystems.extfs',SimpleNamespace(ExtFilesystem=FS))
     (tmp_path/'evidence.E01').write_bytes(b'inert')

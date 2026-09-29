@@ -25,6 +25,8 @@ class Controller:
         self.model_lock=threading.Lock()
         from .runtime_contract import code_identity
         self.runtime_code=code_identity()
+        from .procedures import snapshot
+        snapshot()  # Pin shipped procedure bytes when the runtime is loaded.
 
     def runtime_binding(self):
         from .runtime_contract import binding
@@ -35,7 +37,7 @@ class Controller:
         with self.store.tx():
             for task in self.store.list('task'):
                 if task['status']=='running':
-                    resumable = task['action'] in ('linux_investigate','ai_judgment') or task.get('worker_job_key')
+                    resumable = task['action'] in ('linux_investigate','windows_investigate','ai_judgment') or task.get('worker_job_key')
                     status = 'queued' if resumable else 'failed'
                     self.store.update(task['id'],status=status,error='서버 재시작. 저장된 조사 단계·작업 상태에서 계속합니다.' if resumable else '실행 중 서버가 재시작되었습니다.')
                     self.store.update(task['cell_id'],status=status)
@@ -47,9 +49,10 @@ class Controller:
         if name not in ('standard','triage'):raise ValueError('잘못된 프로파일')
         return json.loads((ROOT/'profiles'/f'{name}.json').read_text(encoding='utf-8'))
 
-    def create(self,name,question,profile):
+    def create(self,name,question,profile,target_os='linux'):
+        if target_os not in ('linux','windows'):raise ValueError('지원하지 않는 조사 OS')
         with self.store.tx():
-            c=self.store.add('case','',name=name,question=question,profile=profile,status='ready',epoch_id=None)
+            c=self.store.add('case','',name=name,question=question,profile=profile,target_os=target_os,status='ready',epoch_id=None)
             c=self.store.update(c['id'],case_id=c['id'])
             self.store.audit(c['id'],'case_created',profile=profile)
             return c
@@ -57,6 +60,10 @@ class Controller:
     def register(self,case_id,path,openrelik_file_id=None):
         c=self.store.get(case_id,'case')
         if c['status'] in ('running','pause_requested'):raise ValueError('조사를 일시정지한 뒤 증거를 추가하세요.')
+        if c.get('target_os')=='windows':
+            from .platforms import WINDOWS_EXTENSIONS
+            if Path(path).suffix.lower() not in WINDOWS_EXTENSIONS:
+                raise ValueError('Windows 증거는 디스크 이미지, EVTX, 검증된 안전 ZIP 또는 정규화 NDJSON/JSONL을 선택하세요.')
         info=metadata(self.evidence_root,path)
         signature=info['signature']
         with self.store.tx():
@@ -64,7 +71,9 @@ class Controller:
             if any(e['path']==path for e in self.store.list('evidence',case_id)):
                 raise ValueError('이미 등록된 증거입니다.')
             e=self.store.add('evidence',case_id,path=path,name=info['name'],size=info['size'],signature=signature,sha256=None,openrelik_file_id=openrelik_file_id,connected=True,segment_count=info.get('segment_count',1),total_size=info.get('total_size',info['size']))
-            for spec in self.profile(c['profile'])['cells']:
+            specs=self.profile(c['profile'])['cells']
+            if c.get('target_os','linux')=='windows':specs=[s for s in specs if s['action']=='integrity']
+            for spec in specs:
                 cell=self.store.add('coverage',case_id,evidence_id=e['id'],status='queued',**spec)
                 fingerprint=hashlib.sha256(json.dumps([path,signature,spec['action'],c['profile'],'native-v1'],sort_keys=True).encode()).hexdigest()
                 task=self.store.add('task',case_id,evidence_id=e['id'],cell_id=cell['id'],action=spec['action'],label=spec['label'],phase=spec['phase'],status='queued',attempts=0,fingerprint=fingerprint,depth=0)
@@ -132,7 +141,7 @@ class Controller:
                 epoch=self.store.get(c['epoch_id'])
             else:
                 epoch=self.store.add('epoch',case_id,status='running',max_jobs=64,jobs=0,started_at=now())
-            c=self.store.update(case_id,status='running',epoch_id=epoch['id'])
+            c=self.store.update(case_id,status='running',epoch_id=epoch['id'],model_wait=None)
             self.store.audit(case_id,'epoch_started',epoch_id=epoch['id'])
         self.wake.set();return c
 
@@ -140,35 +149,41 @@ class Controller:
         """Upgrade existing disk cases by adding content work; keep integrity receipts."""
         from .investigation import seed
         from .detection import VERSION
+        from .platforms import target_os, WINDOWS_VERSION, WINDOWS_EXTENSIONS
+        platform=target_os(self.store.get(case_id))
+        version=WINDOWS_VERSION if platform=='windows' else VERSION
+        scan_action='windows_scan' if platform=='windows' else 'linux_scan'
+        investigate_action='windows_investigate' if platform=='windows' else 'linux_investigate'
         for evidence in self.store.list('evidence',case_id):
-            if not evidence.get('connected',True) or Path(evidence['path']).suffix.lower() not in ('.e01','.raw','.dd','.img'):continue
+            supported=WINDOWS_EXTENSIONS if platform=='windows' else ('.e01','.raw','.dd','.img')
+            if not evidence.get('connected',True) or Path(evidence['path']).suffix.lower() not in supported:continue
             seed(self,case_id,evidence['id'])
-            actions={'linux_scan','linux_investigate','ai_judgment','investigation_report'}
+            actions={scan_action,investigate_action,'ai_judgment','investigation_report'}
             for old in self.store.list('task',case_id):
-                if old['evidence_id']==evidence['id'] and old['action'] in actions and old.get('analysis_version')!=VERSION and not old.get('superseded'):
+                if old['evidence_id']==evidence['id'] and old['action'] in actions and old.get('analysis_version')!=version and not old.get('superseded'):
                     if old['status']=='running' or old.get('execution_unknown'):raise ValueError('이전 분석 작업 종료 상태를 먼저 확인해야 합니다.')
                     self.store.update(old['id'],superseded=True)
                     self.store.update(old['cell_id'],superseded=True)
             existing={t['action'] for t in self.store.list('task',case_id) if t['evidence_id']==evidence['id'] and not t.get('superseded')}
-            for phase,action,label in ((5,'linux_scan','로그·계정·지속성 내용 조사'),(6,'linux_investigate','AI 추가 조사와 반대가설 검토'),(7,'ai_judgment','AI 최종 판단'),(8,'investigation_report','조사 결과와 증거 패키지')):
+            for phase,action,label in ((5,scan_action,'Windows EVTX·Task·Registry·SRUM 조사' if platform=='windows' else '로그·계정·지속성 내용 조사'),(6,investigate_action,'AI 추가 조사와 반대가설 검토'),(7,'ai_judgment','AI 최종 판단'),(8,'investigation_report','조사 결과와 증거 패키지')):
                 if action in existing:continue
                 cell=self.store.add('coverage',case_id,evidence_id=evidence['id'],status='queued',action=action,label=label,phase=phase)
-                upstream=next((t for t in self.store.list('task',case_id) if t['evidence_id']==evidence['id'] and t['action']=='linux_scan' and not t.get('superseded')),None)
-                revision=[upstream['id'],upstream.get('retry_generation',0)] if upstream and action!='linux_scan' else None
-                fingerprint=hashlib.sha256(json.dumps([evidence['id'],evidence['signature'],action,VERSION,revision]).encode()).hexdigest()
-                task=self.store.add('task',case_id,evidence_id=evidence['id'],cell_id=cell['id'],action=action,label=label,phase=phase,status='queued',attempts=0,fingerprint=fingerprint,depth=0,analysis_version=VERSION)
+                upstream=next((t for t in self.store.list('task',case_id) if t['evidence_id']==evidence['id'] and t['action']==scan_action and not t.get('superseded')),None)
+                revision=[upstream['id'],upstream.get('retry_generation',0)] if upstream and action!=scan_action else None
+                fingerprint=hashlib.sha256(json.dumps([evidence['id'],evidence['signature'],action,version,revision]).encode()).hexdigest()
+                task=self.store.add('task',case_id,evidence_id=evidence['id'],cell_id=cell['id'],action=action,label=label,phase=phase,status='queued',attempts=0,fingerprint=fingerprint,depth=0,analysis_version=version,review_policy='autonomous-v1',target_os=platform)
                 self.store.db.execute('INSERT INTO fingerprints VALUES(?,?,?)',(case_id,fingerprint,task['id']))
             evidence_tasks=[t for t in self.store.list('task',case_id) if t['evidence_id']==evidence['id'] and not t.get('superseded')]
             for report_task in evidence_tasks:
                 if report_task['action']=='investigation_report' and report_task['phase']!=8:
                     self.store.update(report_task['id'],phase=8)
                     self.store.update(report_task['cell_id'],phase=8)
-            if any(t['action'] in ('linux_scan','linux_investigate','ai_judgment') and t['status']=='queued' for t in evidence_tasks):
+            if any(t['action'] in (scan_action,investigate_action,'ai_judgment') and t['status']=='queued' for t in evidence_tasks):
                 for report_task in evidence_tasks:
                     if report_task['action']=='investigation_report' and report_task['status'] in GOOD:
                         self.store.update(report_task['id'],status='queued',started_at=None)
                         self.store.update(report_task['cell_id'],status='queued')
-            self.store.audit(case_id,'linux_investigation_prepared',evidence_id=evidence['id'],integrity_policy='기존 검증 영수증 보존; 매 작업 전 세그먼트 구성 변경 검사')
+            self.store.audit(case_id,platform+'_investigation_prepared',evidence_id=evidence['id'],integrity_policy='기존 검증 영수증 보존; 매 작업 전 세그먼트 구성 변경 검사')
 
     def pause(self,case_id):
         with self.store.tx():
@@ -188,23 +203,30 @@ class Controller:
             if self.store.get(task['case_id'])['status'] in ('running','pause_requested'):raise ValueError('실행이 종료된 뒤 재시도하세요.')
             repair={}
             if failed_dossiers_only:
-                if task['action']!='ai_judgment' or task.get('analysis_version')!='linux-hunt-2':raise ValueError('단서 검토 작업만 제한 복구할 수 있습니다.')
+                if task['action']!='ai_judgment' or task.get('analysis_version') not in ('linux-hunt-2','windows-hunt-1'):raise ValueError('단서 검토 작업만 제한 복구할 수 있습니다.')
                 if task.get('dossier_repair_used'):raise ValueError('이 작업의 제한 복구는 이미 요청되었습니다.')
                 from .dossiers import belongs
                 failed=[d for d in self.store.list('dossier',task['case_id']) if belongs(d,task) and d['status']=='model_failed']
                 if not failed:raise ValueError('현재 검토에 복구할 실패 단서가 없습니다.')
                 failed.sort(key=lambda d:(d.get('previously_reviewed',False),d.get('review_priority',6),d['id']))
+                count=3
+                if task.get('review_policy')=='autonomous-v1':
+                    from .review_contracts import REVIEW_BUDGET
+                    from .review_contracts import model_attempts
+                    used=model_attempts(self.store,task['case_id'],task)
+                    count=min(24,max(0,(REVIEW_BUDGET['total_model_attempts']-used)//2))
+                    if not count:raise ValueError('남은 검토 예산이 없습니다. 기존 결과와 실패 진단을 보존합니다.')
                 repair={'dossier_repair_used':True,'repair_generation':task.get('retry_generation',0)+1,
                     'repair_source_generation':task.get('retry_generation',0),
-                    'repair_group_keys':[d['group_key'] for d in failed[:3]],'repair_source_dossier_ids':[d['id'] for d in failed[:3]],
-                    'repair_budget':{'dossiers':3,'jobs':4,'rounds':3,'attempts_per_round':2}}
+                    'repair_group_keys':[d['group_key'] for d in failed[:count]],'repair_source_dossier_ids':[d['id'] for d in failed[:count]],
+                    'repair_budget':{'dossiers':count,'jobs':4,'rounds':3,'attempts_per_round':2}}
             rejudge=task['action']=='ai_judgment' and task['status'] in GOOD|{'partial'}
             if not rejudge and (task['status'] not in ('failed','unsupported','blocked') or task['attempts']>=3):
                 raise ValueError('재시도 가능한 실패 작업이 아니거나 재시도 상한에 도달했습니다.')
             self.store.update(task_id,status='queued',error=None,worker_job_key=None,started_at=None,retry_generation=task.get('retry_generation',0)+1,**repair)
-            if task['action']=='linux_scan':
+            if task['action'] in ('linux_scan','windows_scan'):
                 for child in self.store.list('task',task['case_id']):
-                    if child['evidence_id']==task['evidence_id'] and child['action'] in ('linux_investigate','ai_judgment','investigation_report') and not child.get('superseded'):
+                    if child['evidence_id']==task['evidence_id'] and child['action'] in ('linux_investigate','windows_investigate','ai_judgment','investigation_report') and not child.get('superseded'):
                         self.store.update(child['id'],superseded=True)
                         self.store.update(child['cell_id'],superseded=True)
             self.store.update(task['cell_id'],status='queued',error=None)
@@ -215,6 +237,7 @@ class Controller:
             c=self.store.get(case_id,'case')
             data={kind:self.store.list(kind,case_id) for kind in ('evidence','coverage','task','observation','claim','message','report','epoch','receipt','audit','hypothesis','lineage','dossier','dossier_batch')}
             data['case']=c
+            data['report_scope_revision']=self.store.report_revision(case_id)
             superseded={t['id'] for t in data['task'] if t.get('superseded')}
             old_receipts={r['id'] for r in data['receipt'] if r.get('task_id') in superseded}
             data['observation']=[o for o in data['observation'] if o.get('receipt_id') not in old_receipts]
@@ -235,6 +258,39 @@ class Controller:
             data['review_progress']=review_progress(data)
             from .visual_timeline import project
             data['visual_timeline']=project(data)
+            from .judgment import current_dossiers
+            from .check_ledger import project as checks
+            from .completion import project as completion, presentations
+            tasks={t['id']:t for t in data['task']}
+            active=self.active_ids(case_id)
+            scoped=lambda r:r.get('task_id') in tasks and r.get('evidence_id') in active and r.get('generation',0)==tasks[r['task_id']].get('retry_generation',0)
+            from .case_synthesis import current_view
+            data['case_synthesis']=current_view([r for r in self.store.list('case_synthesis',case_id) if scoped(r)],dossiers=data['dossier'])
+            from .case_memory import project as question_memory
+            data['case_questions']=[q for q in question_memory(self.store,case_id) if scoped(q)]
+            data['test_intents']=[i for i in self.store.list('test_intent',case_id)
+                if i.get('scope',{}).get('task_id') in tasks and i.get('scope',{}).get('evidence_id') in active
+                and i['scope'].get('generation',0)==tasks[i['scope']['task_id']].get('retry_generation',0)]
+            intent_ids={i['id'] for i in data['test_intents']}
+            data['test_result_uses']=[r for r in self.store.list('test_result_use',case_id) if r['test_intent_id'] in intent_ids]
+            data['check_ledger']=checks([r for r in self.store.list('investigation_job',case_id) if scoped(r)],
+                [r for r in data['dossier_batch'] if scoped(r)])
+            from .discovery import project as frontier
+            data['investigation_frontier']=frontier({'observations':[o for o in data['observation'] if o['evidence_id'] in active],
+                'evidence':[e for e in data['evidence'] if e['id'] in active],
+                'dossiers':current_dossiers(data['dossier'],tasks.values(),active),'check_ledger':data['check_ledger']},
+                [r for r in self.store.list('discovery_lead',case_id) if scoped(r)])
+            inputs=presentations(self.store,case_id,tasks)
+            data['objections']=[o for o in self.store.list('objection',case_id)
+                if o.get('task_id') in tasks and not tasks[o['task_id']].get('superseded')
+                and tasks[o['task_id']].get('evidence_id') in active
+                and o.get('generation',0)==tasks[o['task_id']].get('retry_generation',0)]
+            data['completion']=completion({'observations':[o for o in data['observation'] if o['evidence_id'] in active],
+                'dossiers':current_dossiers(data['dossier'],tasks.values(),active),'coverage':cells,
+                'check_ledger':data['check_ledger'],'case_synthesis':data['case_synthesis'],
+                'investigation_frontier':data['investigation_frontier'],'objections':data['objections'],
+                'case_questions':data['case_questions'],'case':data['case'],
+                'test_intents':data['test_intents']},inputs)
             return data
 
     def finish(self,case_id,epoch,status):
@@ -249,9 +305,10 @@ class Controller:
         for ob in self.active_observations(case_id):
             path=ob.get('fields',{}).get('path')
             if ob['type'] in recipe['triggers'] and isinstance(path,str):
-                groups.setdefault(path.casefold(),[]).append(ob)
+                scope=(ob['evidence_id'],ob.get('fields',{}).get('os_instance'),path.casefold())
+                if ob['evidence_id']==parent_task['evidence_id']:groups.setdefault(scope,[]).append(ob)
         children=0
-        for path,observations in groups.items():
+        for (_,_,path),observations in groups.items():
             if len(observations)<2 or children>=recipe['max_children']:continue
             ids=sorted(o['id'] for o in observations)
             fingerprint=hashlib.sha256(json.dumps([recipe['id'],ids]).encode()).hexdigest()
@@ -268,6 +325,8 @@ class Controller:
         with self.store.tx():
             c=self.store.get(case_id)
             if c['status'] not in ('running','pause_requested'):return False
+            from .model_availability import waiting
+            if c['status']=='running' and waiting(self.store,case_id):return False
             if c.get('runtime_binding') and c['runtime_binding']['fingerprint']!=self.runtime_binding()['fingerprint']:
                 self.store.update(case_id,status='paused',investigation_stage='실행 버전 변경으로 중단 · 기존 기록 보존')
                 self.store.audit(case_id,'runtime_contract_mismatch')
@@ -277,7 +336,7 @@ class Controller:
             tasks=[t for t in self.store.list('task',case_id) if t['evidence_id'] in active and not t.get('superseded')]
             queued=sorted([t for t in tasks if t['status']=='queued'],key=lambda t:(t['phase'],t['created_at']))
             if c['status']=='pause_requested':
-                queued=[t for t in queued if t.get('worker_job_key') or t['action']=='linux_investigate']
+                queued=[t for t in queued if t.get('worker_job_key') or t['action'] in ('linux_investigate','windows_investigate')]
                 if not queued:self.store.update(case_id,status='paused');return False
             if not queued:
                 status='complete' if all(t['status'] in GOOD for t in tasks) else 'quiescent'
@@ -286,22 +345,42 @@ class Controller:
             if epoch['jobs']>=epoch['max_jobs'] or age>21600:
                 self.finish(case_id,epoch,'resource_limit');return False
             task=queued[0];e=self.store.get(task['evidence_id'])
-            continuing=bool(task.get('started_at')) and task['action'] in ('linux_investigate','ai_judgment') or bool(task.get('worker_job_key'))
+            continuing=bool(task.get('started_at')) and task['action'] in ('linux_investigate','windows_investigate','ai_judgment') or bool(task.get('worker_job_key')) or bool(task.get('worker_waiting'))
             self.store.update(task['id'],status='running',attempts=task['attempts']+(0 if continuing else 1),started_at=task.get('started_at') or now())
             self.store.update(task['cell_id'],status='running')
             if not continuing:self.store.update(epoch['id'],jobs=epoch['jobs']+1)
         try:
             from .runtime_contract import guard
-            guard(self,case_id,task)
-            info=metadata(self.evidence_root,e['path'])
+            try:
+                guard(self,case_id,task)
+                info=metadata(self.evidence_root,e['path'])
+            except (httpx.TransportError,httpx.HTTPStatusError) as ex:
+                if not os.getenv('WORKER_URL') or isinstance(ex,httpx.HTTPStatusError) and ex.response.status_code<500:
+                    raise
+                # Unreachable is not failed execution. Preserve the same job key
+                # and do not cascade into every downstream task or spend the
+                # epoch's job budget while only polling worker availability.
+                with self.store.tx():
+                    if not task.get('worker_waiting'):
+                        self.store.audit(case_id,'worker_unavailable',task_id=task['id'],error_type=type(ex).__name__)
+                    self.store.update(task['id'],status='queued',worker_waiting=True,
+                        error='작업자 응답 대기 중. 실행 결과를 확인할 때까지 다음 단계로 넘어가지 않습니다.')
+                    self.store.update(task['cell_id'],status='queued')
+                    self.store.update(case_id,investigation_stage='작업자 응답 대기 · 기존 실행 상태 보존',
+                        worker_wait_previous_stage=c.get('worker_wait_previous_stage') if task.get('worker_waiting') else c.get('investigation_stage'))
+                self.stop.wait(2)
+                return True
+            if task.get('worker_waiting'):
+                self.store.update(task['id'],worker_waiting=False,error=None)
+                self.store.update(case_id,investigation_stage=c.get('worker_wait_previous_stage'),worker_wait_previous_stage=None)
             if info['signature']!=e['signature']:
                 raise ValueError('등록 이후 증거가 변경되었습니다. 새 사건에서 다시 등록하세요.')
             integrity=next(t for t in tasks if t['evidence_id']==e['id'] and t['action']=='integrity')
             if task['action']!='integrity' and integrity['status'] not in GOOD:
                 result={'status':'blocked','complete':False,'observations':[],'error':'증거 무결성 확인이 완료되지 않았습니다.'}
-            elif task['action'] in ('linux_investigate','ai_judgment') and not any(t['action']=='linux_scan' and t['evidence_id']==e['id'] and t['status'] in GOOD|{'partial'} for t in tasks):
+            elif task['action'] in ('linux_investigate','windows_investigate','ai_judgment') and not any(t['action']==('windows_scan' if c.get('target_os')=='windows' else 'linux_scan') and t['evidence_id']==e['id'] and t['status'] in GOOD|{'partial'} for t in tasks):
                 result={'status':'blocked','complete':False,'observations':[],'error':'현재 분석 버전의 원문 조사가 완료되지 않았습니다. 원문 조사를 다시 실행하세요.'}
-            elif task['action']=='linux_investigate':
+            elif task['action'] in ('linux_investigate','windows_investigate'):
                 from .investigation import run
                 result=run(self,case_id,e,task)
             elif task['action']=='ai_judgment':
@@ -335,7 +414,7 @@ class Controller:
         if result is None:
             with self.store.tx():
                 self.store.update(task['id'],status='queued')
-                if self.store.get(case_id)['status']=='pause_requested' and task['action']=='linux_investigate':
+                if self.store.get(case_id)['status']=='pause_requested' and task['action'] in ('linux_investigate','windows_investigate'):
                     pending=any(j['status']=='submitted' for j in self.store.list('investigation_job',case_id))
                     if not pending:self.store.update(case_id,status='paused')
             self.stop.wait(1)
@@ -350,7 +429,8 @@ class Controller:
             if task['action']=='integrity' and status in GOOD:
                 manifest=result['manifest']
                 content_hash=hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()
-                self.store.update(e['id'],sha256=content_hash,segment_manifest=manifest)
+                self.store.update(e['id'],sha256=content_hash,segment_manifest=manifest,
+                    integrity_scope=result.get('integrity_scope',{}))
             if status in GOOD or status=='partial':
                 known={o['digest']:o['id'] for o in self.store.list('observation',case_id)}
                 for ob in result.get('observations',[]):
@@ -361,7 +441,9 @@ class Controller:
                     self.store.add('lineage',case_id,observation_id=known[digest],receipt_id=receipt['id'],cell_id=task['cell_id'])
                 if task['action']=='normalize':self.expand(case_id,task)
             self.store.audit(case_id,'task_finished',task_id=task['id'],status=status)
-            if self.store.get(case_id)['status']=='pause_requested':self.store.update(case_id,status='paused')
+            if result.get('execution_unknown'):
+                self.store.update(case_id,status='paused',investigation_stage='이전 작업 실행 상태 확인 필요 · 자동 재실행 중단')
+            elif self.store.get(case_id)['status']=='pause_requested':self.store.update(case_id,status='paused')
         return True
 
     def loop(self):
@@ -377,7 +459,7 @@ class Controller:
             if not progress:self.wake.wait(1);self.wake.clear()
 
     def pack(self,case_id,question=''):
-        if any(o['type'].startswith('linux_') for o in self.active_observations(case_id)):
+        if any(o['type'].startswith(('linux_','windows_')) for o in self.active_observations(case_id)):
             from .investigation import evidence_pack
             pack=evidence_pack(self,case_id,question)
             pack['coverage']=[c for c in self.store.list('coverage',case_id) if c['evidence_id'] in self.active_ids(case_id)]
@@ -428,14 +510,16 @@ class Controller:
             claim=self.store.get(claim_id,'claim')
             if claim['status']!='candidate':raise ValueError('검토 중인 주장만 반증 검토할 수 있습니다.')
             if not set(claim['observation_ids']).issubset({o['id'] for o in self.active_observations(claim['case_id'])}):raise ValueError('연결 해제된 증거의 주장입니다. 증거를 다시 연결하세요.')
-            pack=self.pack(claim['case_id'])
-            selected={o['id']:o for o in pack['observations']}
-            for id in claim['observation_ids']:selected[id]=self.store.get(id,'observation')
-            pack['observations']=list(selected.values())
+            from .claim_review import build_pack,validate_scope,input_hash
+            from .review_stream import resolved
+            pack=build_pack(self,claim)
+            selected={o['id'] for o in resolved(pack)['observations']}
+            record=self.store.add('falsifier_input',claim['case_id'],claim_id=claim_id,pack=pack,input_sha256=input_hash(pack))
             output,receipt=Provider(config).generate(claim['text'],pack,'falsifier')
             if not set(output['contradicting_observation_ids']).issubset(selected):raise ValueError('반증 검토가 존재하지 않는 근거를 참조했습니다.')
             with self.store.tx():
-                self.store.add('receipt',claim['case_id'],receipt_type='model',**receipt)
+                validate_scope(self,claim,pack)
+                self.store.add('receipt',claim['case_id'],receipt_type='model',input_record_id=record['id'],**receipt)
                 return self.store.update(claim_id,falsification=output,review_type='모델 문맥 분리 검토 · 독립 도구 검증 아님')
         finally:self.model_lock.release()
 

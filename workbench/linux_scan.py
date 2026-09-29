@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from .linux_analysis import VERSION, CHECK_TOOL, indicators, text_events, utmp_events
+from .file_hashes import sha256_file
+from .event_groups import initialize as initialize_group, merge as merge_group, grouping_key
 
 MAX_ENTRIES = 1000000
 MAX_FILE = 16 * 1024 * 1024
@@ -24,6 +26,12 @@ MAX_BYTES = 512 * 1024 * 1024
 MAX_GROUPS = 16000
 ROOTS = ['/etc', '/var', '/root', '/home', '/tmp', '/usr', '/opt', '/srv', '/lib', '/lib64', '/bin', '/sbin', '/boot']
 EXCLUDE = {'/proc', '/sys', '/dev', '/run', '/lost+found'}
+
+
+def hash_run_files(run):
+    """Hash run artifacts without materializing large NDJSON files."""
+    return {str(p.relative_to(run)).replace('\\', '/'): sha256_file(p)
+            for p in run.rglob('*') if p.is_file() and p.name != 'progress.tmp'}
 
 
 def candidate(path, mode):
@@ -49,17 +57,25 @@ def priority(item):
 
 
 def scan(image, output_root):
-    from dissect.target import Target
+    from .image_target import open_target
+    with open_target(image, apply=False) as target:
+        return _scan(image, output_root, target)
+
+
+def _scan(image, output_root, target):
     from dissect.target.filesystems.xfs import XfsFilesystem
     from dissect.target.filesystems.extfs import ExtFilesystem
     root = Path(output_root); root.mkdir(parents=True, exist_ok=True)
+    from .disk_budget import require_space
+    import os
+    require_space([(root,2*max(1,min(16,int(os.getenv('HUNT_BUDGET_GIB','8'))))*1024**3+2*MAX_BYTES)])
     run = root / ('RUN-' + uuid.uuid4().hex); run.mkdir(); (run / 'objects').mkdir()
     started = time.monotonic(); progress_path = root / 'progress.json'
     def progress(stage, **kw):
         temp = run / 'progress.tmp'
         temp.write_text(json.dumps({'stage': stage, 'elapsed_seconds': round(time.monotonic() - started), **kw}), encoding='utf-8')
         temp.replace(progress_path)
-    target = Target.open(str(image), apply=False); target.disks.apply()
+    target.disks.apply()
     filesystems = []; scopes = []; entries = []; errors = []; groups = {}; processed = 0; source_count = 0
     for vol in target.volumes:
         vol.seek(0); header = vol.read(4096); vol.seek(0)
@@ -149,19 +165,11 @@ def scan(image, output_root):
                       artifact_path=f"{run.name}/{source['relative_path']}", partition_offset=source['partition_offset'], inode=source['inode'])
         events_file.write(json.dumps(event, ensure_ascii=False) + '\n'); event_count += 1
         # Keep all records on disk; the interactive index groups repetitions.
-        key = json.dumps([source['partition_offset'],source['inode'],source['path'], event['type'], fields.get('command'), fields.get('cwd'), fields.get('user'),
-                          fields.get('address'), fields.get('outcome'), fields.get('state'),
-                          fields.get('excerpt') if event['type'] not in ('linux_authentication', 'linux_cron_call', 'linux_command', 'linux_login_record') else None,
-                          fields.get('host'), fields.get('record_type')], ensure_ascii=False)
+        key = grouping_key(event)
         if key in groups:
-            old = groups[key]['fields']; old['occurrences'] += 1
-            ts = event['timestamp']
-            if ts:
-                old['first_observed'] = min(old.get('first_observed') or ts, ts)
-                old['last_observed'] = max(old.get('last_observed') or ts, ts)
-            old['last_byte_offset'] = fields.get('byte_offset'); old['last_line'] = fields.get('line')
+            merge_group(groups[key],event)
         elif event['type']=='linux_detection' or len(groups) < MAX_GROUPS and type_counts.get(event['type'],0) < 1800:
-            fields.update(occurrences=1, first_observed=event['timestamp'], last_observed=event['timestamp'])
+            initialize_group(event)
             groups[key] = event
             type_counts[event['type']] = type_counts.get(event['type'],0)+1
         else: group_overflow += 1
@@ -258,8 +266,7 @@ def scan(image, output_root):
                     '기본 파서: 파일 16 MiB·보존 512 MiB. 별도 헌팅: 파일 256 MiB·자료군별 총 8 GiB 기본값, ELF 32 MiB. 열거 최대 100만 항목. 초과·미지원은 원장에 명시'],
                 'elapsed_seconds': round(time.monotonic() - started, 3)}
     (run / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-    sums = {str(p.relative_to(run)).replace('\\', '/'): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in run.rglob('*') if p.is_file() and p.name != 'progress.tmp'}
+    sums = hash_run_files(run)
     (run / 'SHA256SUMS.json').write_text(json.dumps(sums, sort_keys=True), encoding='utf-8')
     # Compact inventory summaries remain searchable in the application.
     obs = list(groups.values())

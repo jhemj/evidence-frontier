@@ -1,0 +1,11 @@
+{
+  "version":"investigation-quality-gold-1",
+  "cases":[
+    {"case_id":"time-kind","required_observation_ids":["T1","T2"],"allowed_observation_ids":["T1","T2"],"conclusion":"dispatch_at_1000_success_unknown","next_test":"execution_result_logs","unsupported_claims":["execution_proven","intrusion_at_mtime"]},
+    {"case_id":"lineage","required_observation_ids":["L1","L2"],"allowed_observation_ids":["L1","L2"],"conclusion":"same_source_lineage","next_test":"independent_source","unsupported_claims":["independent_corroboration"]},
+    {"case_id":"older-page","required_observation_ids":["P1","P2"],"allowed_observation_ids":["P1","P2"],"conclusion":"older_scope_unexamined","next_test":"continue_cursor","unsupported_claims":["no_access"]},
+    {"case_id":"new-pivot","required_observation_ids":["D1","D2"],"allowed_observation_ids":["D1","D2"],"conclusion":"configuration_only","next_test":"search_exact_path","unsupported_claims":["execution_proven"]},
+    {"case_id":"network","required_observation_ids":["N1","N2"],"allowed_observation_ids":["N1","N2"],"conclusion":"success_unestablished","next_test":"network_result_records","unsupported_claims":["exfiltration_proven"]},
+    {"case_id":"second-cluster","required_observation_ids":["S1","S2"],"allowed_observation_ids":["S1","S2"],"conclusion":"retain_separate_lead","next_test":"inspect_second_target","unsupported_claims":["second_cluster_benign"]}
+  ]
+}

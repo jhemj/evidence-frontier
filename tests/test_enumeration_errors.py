@@ -1,9 +1,12 @@
 import io,json,sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from workbench.linux_scan import scan
 
 
 def test_root_io_failure_is_preserved_and_missing_paths_are_distinct(tmp_path,monkeypatch):
+    # The fixture has no payload; do not reserve the production 8-GiB hunt cap.
+    monkeypatch.setenv('HUNT_BUDGET_GIB','1')
     volume=io.BytesIO(b'XFSB'+b'\0'*4092);volume.offset=4096;volume.size=4096
     class FS:
         def __init__(self,*a):pass
@@ -13,7 +16,7 @@ def test_root_io_failure_is_preserved_and_missing_paths_are_distinct(tmp_path,mo
             if path=='/var':raise OSError('synthetic damaged directory')
             raise FileNotFoundError(path)
     target=SimpleNamespace(disks=SimpleNamespace(apply=lambda:None),volumes=[volume])
-    monkeypatch.setitem(sys.modules,'dissect.target',SimpleNamespace(Target=SimpleNamespace(open=lambda *a,**k:target)))
+    monkeypatch.setattr('workbench.image_target.open_target',lambda *a,**k:nullcontext(target))
     monkeypatch.setitem(sys.modules,'dissect.target.filesystems.xfs',SimpleNamespace(XfsFilesystem=FS))
     monkeypatch.setitem(sys.modules,'dissect.target.filesystems.extfs',SimpleNamespace(ExtFilesystem=FS))
     result=scan(tmp_path/'fixture.E01',tmp_path/'analysis')

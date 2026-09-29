@@ -56,11 +56,12 @@ def progress(path:str):
     with progress_lock:record=progress_records.get(path)
     if not record and job_manager:
         with job_manager.lock:
-            rows=job_manager.db.execute("SELECT request FROM jobs WHERE status='running'").fetchall()
+            rows=job_manager.db.execute("SELECT id,request FROM jobs WHERE status='running'").fetchall()
         import json
         for row in rows:
-            request=json.loads(row[0])
-            if request['path']==path:record={'action':request['action'],'stage':request['action']}
+            request=json.loads(row['request'])
+            if request['path']==path:
+                record=job_manager.progress(row['id']) or {'action':request['action'],'stage':request['action']}
     if record and record['action']=='linux_scan':
         try:
             import json

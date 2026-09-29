@@ -162,13 +162,13 @@ def test_model_change_during_pack_is_rejected_before_reservation(tmp_path,monkey
     import pytest
     from test_dossiers import setup
     from workbench.dossiers import finish
-    from workbench.review_context import fit
+    from workbench.review_context import fit_metadata_only as fit
     c,cid,e,t,o=setup(tmp_path)
-    def changed(pack):
-        fit(pack)
+    def changed(pack,maximum=36000):
+        fit(pack,maximum)
         config=c.store.list('config')[-1]
         c.store.update(config['id'],provider={**config['provider'],'model':'changed'})
-    monkeypatch.setattr('workbench.review_context.fit',changed)
+    monkeypatch.setattr('workbench.review_context.fit_metadata_only',changed)
     def forbidden(*a,**k):raise AssertionError('model transmission must not occur')
     monkeypatch.setattr('workbench.dossiers.Provider.generate',forbidden)
     with pytest.raises(ValueError,match='실행 조합'):finish(c,cid,e,t)
@@ -184,6 +184,6 @@ def test_refuted_finding_is_separate_in_html_and_retained_in_json(tmp_path):
     c.store.add('dossier',cid,task_id=t['id'],evidence_id=e['id'],generation=0,status='reviewed',
         finding=f,observation_ids=[o['id']],group_key='fixture',baseline=False)
     doc=report_document(c,cid);html=render(doc)
-    current,history=html.split('<h2>반증된 해석</h2>')
+    current,history=html.split('<h2>□ 판단 이력 및 현재 집계 제외 항목</h2>')
     assert f['title'] not in current and f['title'] in history
     assert doc['judgments'][0]['findings'][0]==f

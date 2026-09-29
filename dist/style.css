@@ -809,6 +809,12 @@ progress::-webkit-progress-value {
   font-size: 12px;
   color: #667d94;
 }
+.report-history button[aria-pressed="true"] {
+  color: #1b4e91;
+  background: #edf3fc;
+  border-color: #7b9bc8;
+  font-weight: 700;
+}
 iframe {
   width: 100%;
   height: 780px;

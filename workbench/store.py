@@ -71,6 +71,69 @@ class Store:
           ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
         END;
         ''')
+        # Additive migration: old databases already have the v1 triggers. These
+        # kinds must also invalidate a report being generated on another thread.
+        self.db.executescript('''
+        CREATE TRIGGER IF NOT EXISTS report_revision_synthesis_insert AFTER INSERT ON records
+        WHEN NEW.kind='case_synthesis' BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_synthesis_update AFTER UPDATE ON records
+        WHEN (NEW.kind='case_synthesis' OR OLD.kind='case_synthesis') AND NEW.body<>OLD.body BEGIN
+          INSERT INTO report_revisions VALUES(OLD.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_synthesis_delete AFTER DELETE ON records
+        WHEN OLD.kind='case_synthesis' BEGIN
+          INSERT INTO report_revisions VALUES(OLD.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        ''')
+
+        self.db.executescript('''
+        CREATE TRIGGER IF NOT EXISTS report_revision_discovery_insert AFTER INSERT ON records
+        WHEN NEW.kind='discovery_lead' BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_discovery_delete AFTER DELETE ON records
+        WHEN OLD.kind='discovery_lead' BEGIN
+          INSERT INTO report_revisions VALUES(OLD.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        ''')
+        # Additive migration; never rewrite historical evidence or reports.
+        memory_kinds="'case_question','test_intent','decision_revision'"
+        self.db.executescript(f'''
+        CREATE TRIGGER IF NOT EXISTS report_revision_question_insert AFTER INSERT ON records
+        WHEN NEW.kind IN ({memory_kinds}) BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_question_update AFTER UPDATE ON records
+        WHEN NEW.kind IN ({memory_kinds}) AND NEW.body<>OLD.body BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        ''')
+        self.db.executescript('''
+        CREATE TRIGGER IF NOT EXISTS report_revision_objection_insert AFTER INSERT ON records
+        WHEN NEW.kind IN ('objection','objection_decision') BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_objection_update AFTER UPDATE ON records
+        WHEN NEW.kind='objection' AND NEW.body<>OLD.body BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_objection_delete AFTER DELETE ON records
+        WHEN OLD.kind IN ('objection','objection_decision') BEGIN
+          INSERT INTO report_revisions VALUES(OLD.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        ''')
 
     def ui_revision(self,case_id):
         with self.lock:
@@ -120,7 +183,7 @@ class Store:
     def update(self, id, **changes):
         with self.lock:
             item = self.get(id)
-            if item['kind'] in ('observation','receipt','report','audit','judgment','review_input','review_diagnostic'):
+            if item['kind'] in ('observation','receipt','report','audit','judgment','review_input','review_diagnostic','case_synthesis','synthesis_input','falsifier_input','discovery_lead','objection_decision','decision_revision'):
                 raise ValueError('불변 기록은 수정할 수 없습니다.')
             item.update(changes)
             self.db.execute('UPDATE records SET body=?,case_id=? WHERE id=?', (json.dumps(item,ensure_ascii=False),item['case_id'],id))
