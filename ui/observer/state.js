@@ -15,6 +15,13 @@
     }
     if (!view.narrative.every(n => n.refs.every(refOK))) throw Error('설명 참조 버전 불일치');
     if (!view.timeline.every(t => [t.source_ref,...t.claim_refs].every(refOK))) throw Error('시간축 참조 버전 불일치');
+    for(const t of view.timeline){
+      const r=t.representative_claim_ref,o=r&&view.objects[r.key];
+      if(r&&(!refOK(r)||!t.claim_refs.some(x=>x.key===r.key&&x.version===r.version)||
+          o.type!=='claim'||o.validity!=='adopted'||o.display_binding?.status!=='bound'))throw Error('시간축 대표 단서 불일치');
+    }
+    for(const r of view.relations||[])if(['explains','discriminates'].includes(r.kind)&&
+      (!r.target_scope||r.from_ref?.key!==r.from||r.to_ref?.key!==r.to||!refOK(r.from_ref)||!refOK(r.to_ref)))throw Error('설명 연결 버전 불일치');
     return view;
   }
   const identity = v => [v.envelope.case_id,v.envelope.run_id,v.envelope.data_mode,v.envelope.source_binding||''].join('|');
@@ -38,7 +45,7 @@
       const changed=[];
       if(old) for(const [key,obj] of Object.entries(old.objects)) {
         const next=view.objects[key];
-        if(['claim','hypothesis','question'].includes(obj.type) && next?.version!==obj.version) {
+        if(['claim','hypothesis','question','incident'].includes(obj.type) && next?.version!==obj.version) {
           changed.push({key, old:obj, next:next||null, kind:!next?'removed':next.validity==='invalidated'?'invalidated':'revised',
                         at:e.captured_at, snapshot:e.projection_revision});
         }

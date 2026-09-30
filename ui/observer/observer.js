@@ -7,6 +7,9 @@ let observedWork={id:null,since:null};
 const explanationHistory=new ObserverBriefing.ExplanationHistory();
 const historyRequests=new Set(), historyErrors=new Map();
 const sourceCache=new Map();
+let purposeSource=null;
+const feedbackReaction=new ObserverMoa.ResultReaction();
+const workHistory=new ObserverViewUtils.WorkHistory();
 const renderer=new ObserverRenderer.RendererHost(({available,failed,hidden})=>{
   const moa=document.querySelector('.moa');moa.hidden=!!hidden||available;
   moa.dataset.base=renderer.input.base;moa.dataset.motion=String(renderer.input.motionAllowed&&!failed);
@@ -27,9 +30,9 @@ function previewPose(key){
   $('moa-preview-avatar').setAttribute('aria-label','포식이 동작 예시 · '+pose.label);
   for(const b of $('moa-preview-choices').children)b.setAttribute('aria-pressed',String(b.dataset.pose===key));
 }
-const execution={candidate:'확인 후보',queued:'실행 예정',running:'확인 중',blocked:'자료·도구 부족',
-  succeeded:'검사 완료',covered:'요청 범위 처리 완료',partial:'일부 결과 확보',failed:'검사 실패',waiting:'응답 대기',
-  received:'응답 도착 · 검토 필요',input_registered:'요청 준비 · 전송 여부 미확인',interrupted:'중단',cancelled:'취소',unknown:'상태 미확인'};
+const execution={candidate:'확인 후보',queued:'실행 대기',paused_pending:'일시정지 · 대기 작업 보존',running:'확인 중',blocked:'자료·도구 부족',
+  succeeded:'검사 완료',covered:'요청 범위 처리 완료',covered_zero:'검사 완료 · 해당 검색 범위 일치 없음',partial:'일부 결과 확보',failed:'검사 실패',unsupported:'지원되지 않는 검사',waiting:'응답 대기',
+  received:'응답 도착 · 검토 필요',validating:'답변·근거 검증 중',adopting:'검증된 결과 반영 중',input_registered:'요청 준비 · 전송 여부 미확인',interrupted:'중단',cancelled:'취소',unknown:'상태 미확인'};
 const questions={open:'조사 중',reopened:'재검토',held:'판단 보류',input_wait:'입력 대기',scoped_answered:'현재 범위 종결',contextual:'문맥별 답변',unknown:'미제공'};
 const validity={adopted:'검토된 단서',candidate:'검토 전',invalidated:'정정으로 제외',unresolved_references:'근거 확인 필요',historical_assessment:'지난 조사에서 나온 해석'};
 const caseStates={running:'조사 중',pause_requested:'일시정지 처리 중',paused:'일시정지',
@@ -51,7 +54,7 @@ function button(text, action, cls) {
 function badge(text, kind='') {return node('span',text,'badge '+kind);}
 function empty(text) {return node('p',text,'empty');}
 function dt(value) {
-  if(!value)return '미제공';const date=new Date(value);return Number.isNaN(date.valueOf())?String(value):date.toLocaleString('ko-KR',{hour12:false})+' · 표시 장치 시각';
+  return value?ObserverViewUtils.clockText(String(value)):'미제공';
 }
 function clear(id) {$(id).replaceChildren();return $(id);}
 function line(label,text){const n=node('div',null,'summary-line');n.append(node('span',label),node('div',text));return n;}
@@ -65,6 +68,45 @@ function refButton(key,label) {
   const o=state.displayed.objects[key];
   if(!o)return node('span','연결되지 않은 참조','note');
   const b=button(label||o.title,()=>{openInspection(key);renderTimeline();},'source-link');b.dataset.key=key;return b;
+}
+function openPurposeSource(ref,view){
+  const o=view.objects[ref.key];
+  if(!o||o.type!=='observation'||o.version!==ref.version||o.source_version!==ref.source_version)return;
+  const envelope=view.envelope;
+  const n=clear('purpose-source-body');purposeSource={ref,envelope};
+  n.append(node('h3',o.title),node('p',o.limitation,'note'));
+  const dl=node('dl');addDefinition(dl,'원문 위치',o.source_location||o.title);
+  for(const [key,value] of Object.entries(o.locator||{}))if(value!==null&&value!==undefined)addDefinition(dl,key,value);
+  const technical=node('details');technical.append(node('summary','단서 위치·참조'),node('p',o.id,'source-locator'),dl);n.append(technical);
+  const excerpt=node('pre',o.excerpt??'텍스트 발췌가 없는 단서입니다. 원문 위치·참조를 확인해 주세요.','excerpt');n.append(excerpt);
+  if(o.excerpt_partial&&envelope.data_mode!=='example'){
+    n.append(node('p','현재 보존 원문의 일부를 보여드려요.','note'));
+    let loaded='',offset=0;
+    const more=button('보존 원문 더 읽기',async()=>{
+      more.disabled=true;
+      try{
+        const p=await read('/api/sources/'+encodeURIComponent(envelope.projection_revision)+'/'+encodeURIComponent(o.id)+'?offset='+offset+'&limit=65536');
+        if(p.source_version!==ref.source_version||p.observation_id!==o.id)throw Error('원문 버전 변경');
+        if(loaded.length+p.text.length>2000000)throw Error('화면 읽기 한도 도달');
+        loaded+=p.text;excerpt.textContent=loaded;offset=p.next_offset;more.hidden=offset===null;more.disabled=false;
+      }catch(e){n.append(node('p','원문 추가 읽기 제한: '+e.message,'note'));more.disabled=false;}
+    });n.append(more);
+  }
+  refreshPurposeSource();if(!$('purpose-source-dialog').open)$('purpose-source-dialog').showModal();
+}
+function refreshPurposeSource(){
+  if(!purposeSource)return;
+  const {ref,envelope}=purposeSource,o=state.current?.objects[ref.key];
+  const current=!offline&&state.sync==='ready'&&state.current.envelope.case_id===envelope.case_id&&
+    state.current.envelope.run_id===envelope.run_id&&o?.version===ref.version&&o?.source_version===ref.source_version;
+  $('purpose-source-freshness').textContent=current?'이 작업의 설명에 연결된 보존 원문이에요. 열람으로 새 검사를 실행하지 않아요.':
+    '열어 둔 원문은 당시 버전이에요. 현재 연결이나 단서 버전이 바뀌었는지 확인해 주세요.';
+}
+function appendPurpose(textContainer,item,view){
+  for(const part of ObserverViewUtils.purposeFragments(item,view)){
+    if(part.ref){const b=button(part.text,()=>openPurposeSource(part.ref,view),'inline-source');b.dataset.key=part.ref.key;b.title=view.objects[part.ref.key].title;textContainer.append(b);}
+    else textContainer.append(node('span',part.text,part.unresolved?'unresolved-reference':undefined));
+  }
 }
 function safeFreshness() {
   if(offline)return '연결이 끊겼어요 · 마지막으로 받은 내용을 보여드려요';
@@ -83,10 +125,10 @@ function alerts() {
   if(state.pinnedChanged())warnings.push('고정한 내용 이후에 판단이나 근거가 바뀌었어요. 지금 읽는 위치는 유지하고, 최신 내용은 따로 확인할 수 있어요.');
   if(state.changes.length)warnings.push('판단·근거 표시 '+state.changes.length+'건이 바뀌었어요. 무엇이 달라졌는지는 작업 이력에서 확인할 수 있어요.');
   if(state.omittedChanges)warnings.push('이 브라우저의 변경 이력은 최근 200건만 표시합니다. 앞선 '+state.omittedChanges+'건은 원장 이력에서 확인해야 합니다.');
-  const failures=state.current?currentActivity().items.filter(a=>a.state==='failed'):[];
+  const failures=state.current?currentActivity().items.filter(a=>a.state==='failed'&&['unresolved','partial'].includes(a.failure_impact)):[];
   for(const a of failures.slice(0,2)){
     const f=ObserverMoa.failure(a);
-    warnings.push('지난 실패 기록: '+f.label+' — '+f.reason+' '+f.impact);
+    warnings.push('영향이 남은 실패: '+f.label+' — '+f.reason+' '+f.impact);
   }
   if(failures.length>2)warnings.push('다른 실패 기록 '+(failures.length-2)+'건은 작업 이력에서 확인할 수 있어요.');
   const reportFailures=(state.current?.report_finalizations||[]).filter(r=>r.status==='failed'||r.status==='superseded');
@@ -101,9 +143,22 @@ function alerts() {
   $('moa-verdict-scope').hidden=!appearance.scope;
   $('moa-verdict-detail').hidden=!appearance.key;
   $('moa-verdict-detail').onclick=()=>appearance.key&&openInspection(appearance.key);
-  const work=ObserverMoa.activity(state.current,currentActivity().items,{available});
-  renderer.update({base:work.base,
-    transient:'none',severity:warnings.length?'warning':'info'});
+  updateFeedback(available);
+}
+function updateFeedback(available,now=Date.now()){
+  const items=currentActivity().items,work=ObserverMoa.activity(state.current,items,{available});
+  const ended=['ended','offline'].includes(work.base),failed=available&&!ended?ObserverMoa.recentFailure(items):null;
+  const envelope=state.current.envelope;
+  const reaction=feedbackReaction.update(ObserverMoa.completedItem(items),{
+    scope:JSON.stringify([envelope.case_id,envelope.run_id,envelope.data_mode]),available:available&&!ended,now});
+  renderer.update({base:work.base,...reaction});
+  const message=$('guide-feedback');if(!message)return;
+  message.hidden=!failed;
+  if(failed&&message.dataset.failureId!==failed.id){
+    const f=ObserverMoa.failure(failed);message.dataset.failureId=failed.id;
+    message.replaceChildren(badge('이전 실패 · 아직 확인할 내용이 남아 있어요','warn'),node('strong',f.label),
+      node('p',f.reason),node('p',f.impact,'note'),button('이 작업 보기',()=>{workHistory.select(failed.id);render();}));
+  }
 }
 function renderSummary() {
   const v=state.displayed, s=v.summary;
@@ -115,7 +170,7 @@ function renderSummary() {
   $('summary-title').textContent=state.pinned?'과거 판단 열람':'조사 현황';
   const summary=clear('summary');
   summary.append(line('조사 상태',caseStates[v.case.status]||'상태 미확인'),
-    line('남은 확인',s.unassessed_tests?'아직 판단하지 못한 검사가 있어요 · '+s.unassessed_tests+'개':
+    line('남은 확인',!values('test',v).length?'판단할 검사는 아직 기록되지 않았어요':s.unassessed_tests?'아직 판단하지 못한 검사가 있어요 · '+s.unassessed_tests+'개':
       '검사 해석이 모두 기록돼 있어요 · 사건 규명 완료와는 달라요'));
   $('pin').setAttribute('aria-pressed',String(!!state.pinned));$('pin').textContent=state.pinned?'최신 내용으로 돌아가기':'지금 내용 고정';
   $('report-count').textContent=v.reports.length?v.reports.length+'개':'미생성';
@@ -138,18 +193,29 @@ function renderNarrative() {
     gaps:[],judgment:entry.judgment,lifecycle:entry.lifecycle,changed_at:entry.at}:null):record?.owner;
   const {real,active:activeExplanation}=live;
   const workExplanation=ObserverMoa.activity(state.current,currentActivity().items,{available});
-  $('workspace').classList.toggle('reading-past',past);
-  $('explanation-position').textContent=record?(past?'이전 설명':'현재 설명')+' · '+(explanationHistory.index+1)+' / '+explanationHistory.items.length:'현재 설명';
-  $('explanation-at').textContent=record?.at?dt(record.at):'';
-  $('explanation-older').disabled=!available||!record||explanationHistory.index>=explanationHistory.items.length-1;
-  $('explanation-newer').disabled=!available||!past;
-  $('explanation-current').hidden=!past;
-  const historyNote=$('explanation-history-note');historyNote.hidden=!past;
-  historyNote.textContent=record?.removed?'이 설명은 현재 판단에서 바뀌거나 제외됐어요. 당시 기록을 보고 있으며, 현재 판단과는 달라요.':
-    '당시에 정리한 설명을 보고 있어요. 현재 조사 상태·사건 시간축·보고서는 그대로 유지돼요.';
-  work.append(badge(real?'지금 조사 중':!available?'연결 확인 중':ctx.ended?'조사가 멈춰 있어요':'현재 상태'));
+  workHistory.update(state.current.envelope,currentActivity().items,ObserverMoa.currentItem(currentActivity().items));
+  const priorWork=workHistory.past?workHistory.selected:null;
+  const resultItems=workHistory.items.filter(a=>a.id!==workHistory.currentId&&ObserverMoa.completedItem([a]));
+  const resultIndex=Math.max(0,resultItems.findIndex(a=>a.id===priorWork?.id));
+  $('workspace').classList.toggle('reading-past',!!priorWork);
+  $('explanation-position').textContent=resultItems.length?(priorWork?'지난 조사 결과':'최근 조사 결과')+' · '+(resultIndex+1)+' / '+resultItems.length:'아직 이전 결과가 없어요';
+  $('explanation-at').textContent=(priorWork||resultItems[0])?.at?dt((priorWork||resultItems[0]).at):'';
+  $('explanation-older').disabled=!available||resultIndex>=resultItems.length-1;
+  $('explanation-newer').disabled=!available||!workHistory.past||resultIndex===0;
+  $('explanation-current').hidden=!workHistory.past;
+  const historyNote=$('explanation-history-note');historyNote.hidden=!workHistory.past;
+  historyNote.textContent='지난 작업을 보고 있어요. ‘현재 조사 중’에는 지금 진행 중인 작업을 계속 보여드려요. 과거 결과는 현재 판단과 달라요.';
+  work.append(badge(!available?'연결 확인 중':ctx.ended?'현재 조사 · 멈춤':'현재 조사 중'));
   const liveText=node('p',workExplanation.label);liveText.id='guide-work-live';work.append(liveText);updateLiveWork();
+  if(workExplanation.purpose){
+    const why=node('div',null,'work-purpose');why.dataset.workId=workExplanation.purpose_ref;
+    const text=node('p');appendPurpose(text,ObserverMoa.currentItem(currentActivity().items),state.current);
+    why.append(node('strong','확인하는 이유'),text);work.append(why);
+  }else if(ObserverMoa.currentItem(currentActivity().items)?.kind==='tool'&&available){
+    work.append(node('p','이 작업의 구체적인 검사 목적은 아직 기록되지 않았어요.','note'));
+  }
   if(workExplanation.subjects?.length){
+    const detail=node('details');detail.dataset.detail='current-input';detail.append(node('summary','검토 중인 단서와 요청 상태 보기'));
     const list=node('ul',null,'review-subjects');
     for(const s of workExplanation.subjects){
       const item=node('li');item.append(node('strong',s.label));
@@ -157,88 +223,84 @@ function renderNarrative() {
       if(s.omitted)item.append(node('div','검토 입력 기록 '+s.presented+'개 중 예시 '+s.examples.length+'개를 보여드려요.','note'));
       list.append(item);
     }
-    work.append(list);
+    detail.append(list);work.append(detail);
     const omitted=ObserverMoa.currentItem(currentActivity().items)?.context?.omitted_subject_count;
     if(omitted)work.append(node('p','이 화면에 연결하지 못한 검토 대상 '+omitted+'개가 더 있어요.','note'));
   }
   if(workExplanation.statusNote)work.append(node('p',workExplanation.statusNote,'note'));
   if(state.pinned)work.append(badge('과거 내용을 보고 있어요','warn'));
   if(past)work.append(node('p','설명을 넘겨 봐도 실제 조사는 바뀌지 않아요.','note'));
+  renderPreviousWork(priorWork||ObserverMoa.completedItem(workHistory.items,{excludeId:ObserverMoa.currentItem(currentActivity().items)?.id}),!!priorWork,available);
   if(primary){
     const h=primary,isActive=!past&&h.key===activeExplanation?.key;
+    $('hypothesis-summary-label').textContent=(h.assessment_current?'살펴보는 가능성과 이유':'마지막 검토한 가능성 · 새 근거 반영 필요')+' — '+(h.title||h.scope||'조사 내용');
+    const bundle=ObserverBriefing.composeBundle(h,state.displayed,{ended:ctx.ended,historical:!!record?.archived,restricted:o=>state.isRestricted(o)});
     const bubble=node('article',null,'thought hypothesis '+(isActive?'active':past?'inactive':'viewing'));
     bubble.dataset.key=h.key;
     bubble.append(badge(past?'지난 가설 · 현재 판단이 아니에요':h.validity==='candidate'?'새 가설 · 아직 검토 전':!h.assessment_current?'마지막 가설 · 다시 확인해야 해요':isActive?'이번 검사와 관련된 가설':'지금 살펴보는 가설',!h.assessment_current?'warn':''));
     const label=h.assessment_current&&h.lifecycle==='refuted'?'근거와 맞지 않아 다시 본 가설':h.assessment_current&&h.judgment==='유력'?'지금 더 유력하게 보는 가설':'이 가능성을 살펴보고 있어요';
-    bubble.append(node('h3',past||ctx.ended?'이 가능성을 살펴봤어요':label),node('strong',h.title||h.scope));
+    bubble.append(node('h3',past||ctx.ended?'이 가능성을 살펴봤어요':label),line('조사 주제',h.title||h.scope));
     if(h.validity==='candidate')bubble.append(node('p','조사를 위해 떠올린 가능성이에요. 아직 맞는지 확인하지 않았어요.','note'));
-    else if(!h.assessment_current&&!past)bubble.append(node('p','새 근거가 반영됐는지 다시 확인해야 해요. 지난 판단을 그대로 확정할 수는 없어요.','note'));
+    if(bundle.fact)bubble.append(line('왜 살펴보나요?',bundle.fact));
+    if(bundle.reason)bubble.append(line('검토 중인 설명',bundle.reason));
+    if(bundle.linkageGap)bubble.append(node('p',bundle.linkageGap,'note'));
+    if(bundle.next)bubble.append(line(bundle.nextStatus,bundle.next));
+    if(bundle.nextGap)bubble.append(node('p',bundle.nextGap,'note'));
+    if(bundle.limitation)bubble.append(line('아직 모르는 점',bundle.limitation));
     const why=node('details');why.dataset.detail='thought-'+h.key;
-    why.append(node('summary','가설 설명과 남은 의문'));
+    why.append(node('summary','왜 이렇게 생각하나요? · 근거와 판별 기준'));
     if(h.scope)why.append(line('살펴본 질문',h.scope));
     if(h.statement)why.append(node('p',h.statement));
     for(const text of h.counterarguments||[])if(text)why.append(line('다른 가능성',text));
-    for(const text of h.gaps||[])if(text)why.append(node('p',text,'note'));bubble.append(why);
+    for(const text of h.gaps||[])if(text)why.append(node('p',text,'note'));
+    if(bundle.claim)why.append(refButton(bundle.claim.key,'이 설명의 단서와 원문 보기'));
+    if(bundle.test){
+      for(const o of bundle.plan.outcomes){const row=node('div',null,'outcome '+o.kind);row.append(node('strong',o.label),node('p',o.text));why.append(row);}
+      if(!bundle.plan.outcomes.length)why.append(node('p','판단을 바꿀 구체적인 결과 기준은 아직 없어요.','note'));
+      if(bundle.plan.incomplete)why.append(node('p','일부 결과만 확보했어요. 전체 범위를 확인한 것은 아니에요.','note'));
+      why.append(refButton(bundle.test.key,'연결된 검사 결과 보기'));
+    }
+    if(entry){
+      why.append(node('p','당시에 보존한 설명이에요. 현재 작업이나 현재 판단으로 대신하지 않아요.','note'));
+      for(const ref of saved.source_refs)if(state.displayed.objects[ref.key])why.append(refButton(ref.key,'당시 인용 · 현재 보존 원문 보기'));
+    }
+    bubble.append(why);
     bubble.append(button(past?'현재 가설과 비교하기':'가설과 근거 살펴보기',()=>openInspection(h.key),'thought-link'));
     rail.append(bubble);
   }
   else if(record?.archived){
+    $('hypothesis-summary-label').textContent='지난 조사 설명';
     const bubble=node('article',null,'thought inactive');
     const error=historyErrors.get(record.token);
     bubble.append(badge(error?'지난 설명을 불러오지 못했어요':'지난 설명을 불러오는 중'),
       node('p',error||'원장에 보존된 당시 설명을 확인하고 있어요. 현재 설명으로 대체하지 않아요.'));
     if(error)bubble.append(button('다시 확인',()=>loadExplanation(record,true)));rail.append(bubble);
   }
-  else {const bubble=node('article',null,'thought '+(real&&available?'active':'inactive'));
-    bubble.append(badge('지금 하는 일'),node('h3',workExplanation.label),
-      node('p',workExplanation.why||'현재 근거로 비교한 가설은 아직 없어요. 다음 검사와 근거의 연결을 확인해야 해요.'));
-    if(workExplanation.meaning)bubble.append(node('p',workExplanation.meaning,'note'));rail.append(bubble);}
-  if(primary){
-    const why=node('article',null,'thought '+(primary.assessment_current?'reason':'inactive'));
-    why.append(badge(primary.assessment_current?'왜 이렇게 생각하나요?':'당시에는 왜 이렇게 생각했나요?'),
-      node('p',primary.ranking_reason||primary.historical_reason||primary.reason||'가설의 이유가 아직 기록되지 않았어요.'));
-    if(!record.archived)why.append(refButton(primary.key,'근거와 다른 가능성 보기'));rail.append(why);
-  }
-  const relatedClaim=available&&!record?.archived&&ObserverBriefing.claimFor(primary,state.displayed);
-  const list=relatedClaim&&!state.isRestricted(relatedClaim)?[{kind:'adopted_claim',text:ObserverBriefing.factText(relatedClaim),
-    limitations:relatedClaim.gaps,refs:[{key:relatedClaim.key,version:relatedClaim.version}],dedupe_key:relatedClaim.key}]:primary?[]:record?[]:currentNarratives().filter(item=>item.kind!=='status').slice(0,1);
-  if(entry){
-    const bubble=node('article',null,'thought inactive');bubble.append(badge('당시 정리한 내용 · 확정 사실과는 달라요'),
-      node('p',entry.statement||'당시 단서 요약은 기록되지 않았어요.'));
-    for(const ref of saved.source_refs){
-      if(state.displayed.objects[ref.key])bubble.append(refButton(ref.key,'연결된 원문 보기 · 현재 보존 버전'));
-    }
-    if(entry.observation_ids.length>saved.source_refs.length)bubble.append(node('p','당시 인용 중 일부는 이 화면에 연결되지 않았어요.','note'));
-    bubble.append(node('p','원문 링크는 현재 보존된 버전이에요. 당시 원문의 버전·최신성까지 확인됐다는 뜻은 아니에요.','note'));n.append(bubble);
-  }
-  else if(!list.length&&workExplanation.meaning&&!primary){
-    const bubble=node('article',null,'thought fact');bubble.append(badge('이 작업으로 무엇을 알 수 있나요?'),node('p',workExplanation.meaning));n.append(bubble);
-  }
-  else if(!list.length)n.append(empty(record?.archived?'당시 설명을 불러오면 함께 보여드릴게요.':primary?'이 가설에 연결된 단서 설명은 아직 확인하지 못했어요.':'단서를 찾고 있어요. 검토된 내용이 생기면 근거와 함께 설명할게요.'));
-  for(const item of list) {
-    const c=item.refs.map(r=>state.displayed.objects[r.key]).find(o=>o?.type==='claim');
-    const bubble=node('article',null,'thought '+(past?'inactive':'fact'));bubble.append(badge(past?'이 설명에 연결된 단서 · 현재 보존 버전':item.kind==='adopted_claim'?'어떤 단서를 찾았나요?':'지금 알 수 있는 것'),node('p',c?ObserverBriefing.factText(c):item.text));
-    if(item.limitations.length) {
-      const limits=node('details');limits.append(node('summary','아직 확인할 내용 '+item.limitations.length+'개'));
-      limits.dataset.detail='narrative-'+item.dedupe_key;
-      for(const text of item.limitations)limits.append(node('p',text,'note'));bubble.append(limits);
-    }
-    for(const ref of item.refs)bubble.append(refButton(ref.key,'단서 자세히 보기'));n.append(bubble);
-  }
-  const next=clear('next-discriminator');
-  const t=record?.archived||primary?.key!==ctx.primary?.key?null:ctx.test;
-  if(available&&t){
-    const plan=ObserverBriefing.testExplanation(t,{ended:ctx.ended});
-    next.append(badge(past?'이 설명에 연결된 검사 · 현재 작업과 별개':plan.status,t.execution==='blocked'?'warn':''),node('h3',past||ctx.ended?'무엇을 확인하려 했나요?':'무엇을 확인하나요?'),node('p',plan.purpose));
-    const results=node('details');results.dataset.detail='outcomes-'+t.key;results.open=true;
-    results.append(node('summary','결과에 따라 이렇게 판단할 수 있어요'));
-    for(const o of plan.outcomes){const row=node('div',null,'outcome '+o.kind);row.append(node('strong',o.label),node('p',o.text));results.append(row);}
-    if(!plan.outcomes.length)results.append(node('p','가설 판단을 바꿀 구체적인 결과 기준은 아직 없어요.','note'));
-    results.append(node('p',plan.incomplete?'일부 결과만 있어요. 전체 범위를 확인한 것처럼 판단하지 않을게요.':'이것은 확인 기준이에요. 결과를 해석해야 실제 판단이 달라져요.','note'));
-    next.append(results,refButton(t.key,'검사 결과와 근거 보기'));
-  }
-  else if(available&&(primary?.next_discriminator||primary?.historical_next_discriminator))next.append(badge(past?'당시 제안한 확인 방법 · 실행 여부는 별도':'확인 후보 · 아직 시작하지 않았어요'),node('p',primary.next_discriminator||primary.historical_next_discriminator));
-  else next.append(empty(available?'다음에 무엇을 확인할지는 아직 정하지 못했어요.':'연결이 확인되면 조사 내용을 보여드릴게요.'));
+  else {$('hypothesis-summary-label').textContent='살펴보는 가능성과 이유 · 아직 비교 전';rail.append(node('p','아직 근거와 대조한 설명이 없어요. 지금 하는 자료 확인은 아래에서 볼 수 있어요.','note'));}
+  // Compatibility containers stay empty: facts/limits/tests share ONE bundle.
+  clear('next-discriminator');n.hidden=true;
+}
+function renderPreviousWork(item,browsing,available){
+  const n=clear('previous-work'),result=ObserverMoa.workResult(item);
+  n.dataset.workId=item?.id||'';n.classList.toggle('browsing',browsing);
+  n.append(badge(browsing?'지난 조사 작업':'이전 조사 결과'),
+    node('h3',item?ObserverMoa.workTarget(item):result.label));
+  if(item){
+    n.append(node('p',result.label,'work-result'),node('p',result.detail));
+    if(result.limitation)n.append(node('p',result.limitation,'note'));
+    n.append(node('p',dt(item.completed_at||item.at)+(item.completed_at?' · 완료 기록':' · 상태 확인 기록'),'note'));
+    if(item.purpose){const details=node('details');details.dataset.detail='previous-purpose-'+item.id;
+      const p=node('p');appendPurpose(p,item,state.current);details.append(node('summary','왜 확인했나요?'),p);n.append(details);}
+    const refs=(item.result_refs||[]).filter(r=>state.current.objects[r.key]?.version===r.version&&
+      state.current.objects[r.key]?.source_version===r.source_version);
+    if(refs.length){const details=node('details');details.dataset.detail='previous-result-'+item.id;
+      details.append(node('summary','확보한 단서 보기'));for(const ref of refs.slice(0,3))details.append(button(state.current.objects[ref.key].title,()=>openPurposeSource(ref,state.current),'source-link'));n.append(details);}
+    n.append(button('작업 상세 보기',()=>{
+      $('activity-filter').value='all';renderActivity();$('work-history').open=true;$('work-dialog').showModal();
+      for(const row of $('history').children)if(row.dataset.workId===item.id){row.querySelector('details').open=true;row.scrollIntoView({block:'nearest'});break;}
+    },'work-detail'));
+  }else n.append(node('p',result.detail,'note'));
+  if(!available)n.append(badge('마지막으로 받은 결과 · 현재 상태 미확인','warn'));
 }
 async function loadExplanation(record,retry=false){
   if(!record?.archived||explanationHistory.loaded(record)||historyRequests.has(record.token))return;
@@ -253,17 +315,21 @@ async function loadExplanation(record,retry=false){
 }
 function navigateExplanation(delta){
   const control=document.activeElement?.id;
-  const record=delta===null?explanationHistory.latest():explanationHistory.move(delta);
-  render();loadExplanation(record);announce(delta===null?'현재 설명으로 돌아왔어요.':'다른 설명을 보고 있어요. 실제 조사는 바뀌지 않아요.');
+  delta===null?workHistory.latest():workHistory.move(delta,{
+    eligible:a=>a.id!==workHistory.currentId&&!!ObserverMoa.completedItem([a]),
+    defaultId:ObserverMoa.completedItem(workHistory.items,{excludeId:workHistory.currentId})?.id});
+  render();announce(delta===null?'지금 하는 작업으로 돌아왔어요.':'지난 작업을 보고 있어요. 실제 조사는 바뀌지 않아요.');
   if(control==='explanation-current'||control==='explanation-older'&&$('explanation-older').disabled)
     (delta===null?$('explanation-older'):$('explanation-newer')).focus({preventScroll:true});
 }
 function activityRow(a) {
   const n=node('div',null,'activity-item');
+  n.dataset.workId=a.id;
   n.append(badge(execution[a.state]||'상태 미제공',a.state==='failed'?'error':''),node('strong',a.title),node('div',ObserverMoa.workTarget(a),'target'));
-  if(a.failure)n.append(node('p',a.failure.reason),node('p',a.failure.impact,'note'));
+  if(a.failure)n.append(badge(a.failure_impact==='resolved'?'재시도로 회복된 과거 실패':a.failure_impact==='partial'?'일부 영향이 남은 실패':a.failure_impact==='unresolved'?'영향이 남은 실패':'과거 실패 · 현재 영향 미확인'),node('p',a.failure.reason),node('p',a.failure.impact,'note'));
   n.append(node('div',dt(a.at),'when'));
-  const details=node('details');details.append(node('summary',a.error?'실패 원인·작업 참조':'작업 참조'),node('div',a.id,'target'));
+  const details=node('details');details.dataset.detail='activity-'+a.id;details.append(node('summary',a.error?'실패 원인·작업 참조':'작업 참조'),node('div',a.id,'target'));
+  if(a.purpose){const p=node('p');appendPurpose(p,a,state.current);details.append(node('strong','확인하는 이유'),p);}
   for(const s of ObserverMoa.reviewSubjects(a)){
     details.append(line('검토 단서',s.title||s.id));
     for(const e of s.examples)details.append(node('p',e.label+(e.path?' · '+e.path:'')));
@@ -274,7 +340,7 @@ function activityRow(a) {
 function renderActivity() {
   // Global activity always refers to the newest received snapshot, not selected/pinned evidence.
   const data=currentActivity(), live=session?.mode==='read_only_live';
-  const active=state.current.case.execution_end?[]:data.items.filter(a=>['running','waiting'].includes(a.state));
+  const active=state.current.case.execution_end?[]:data.items.filter(a=>['running','waiting','validating','adopting'].includes(a.state));
   const n=clear('activity');
   n.append(node('p','작업 확인: '+dt(data.checked_at)+(live?' · 원장 관측':' · 보존 상태'),'note'));
   if(!active.length)n.append(empty(state.current.case.execution_end?
@@ -282,12 +348,12 @@ function renderActivity() {
     '이 관측 범위에서 실행 중으로 확인된 작업이 없습니다. 원장 미제공 상태를 실행 없음으로 단정하지 않습니다.'));
   if(!active.length&&data.items.length)n.append(node('p','최근 작업 기록 · 현재 실행 아님','note'));
   for(const a of (active.length?active:data.items).slice(0,5))n.append(activityRow(a));
-  if(active.length>5)n.append(node('p','외 '+(active.length-5)+'개 · 전체 이력에서 확인','note'));
+  if(active.length>5)n.append(node('p','외 '+(active.length-5)+'개 · 작업 이력에서 확인','note'));
   const unknown=data.items.filter(a=>a.state==='input_registered').length;
   if(unknown)n.append(node('p','입력만 등록된 '+unknown+'건은 실제 요청·실행 여부 미확인입니다.','note'));
   const eta=node('details');eta.append(node('summary',state.current.case.execution_end?'실행 종료 · ETA 없음':'ETA 산정 불가'),node('p',data.eta_reason,'note'));n.append(eta);
   const filter=$('activity-filter').value, h=clear('history');
-  const rows=data.items.filter(a=>filter==='all'||filter==='active'&&['running','waiting','input_registered'].includes(a.state)||filter==='failed'&&a.state==='failed'||filter==='finished'&&['received','interrupted','cancelled','succeeded','covered','partial'].includes(a.state));
+  const rows=data.items.filter(a=>filter==='all'||filter==='active'&&['running','waiting','input_registered','validating','adopting'].includes(a.state)||filter==='failed'&&a.state==='failed'||filter==='finished'&&['received','interrupted','cancelled','succeeded','covered','partial'].includes(a.state));
   for(const a of rows)h.append(activityRow(a));
   if(!rows.length)h.append(empty('해당 작업 없음'));
   $('last-progress').textContent=state.current.summary.last_meaningful_change?
@@ -361,6 +427,9 @@ function renderSelection() {
   if(!o)return;
   n.append(badge(types[o.type]),node('h3',o.title));
   const technical=node('details');technical.dataset.detail='technical-'+o.key;technical.append(node('summary','원장 참조·버전'),node('p',o.id+' · v '+o.version.slice(0,12),'source-locator'));n.append(technical);
+  const annotation=(state.displayed.jev_annotations||[]).find(a=>a.subject_id===(o.owner_id||o.id));
+  if(annotation){const jev=node('details');jev.dataset.detail='jev-'+annotation.id;
+    jev.append(node('summary','Jev 단서 분류 · '+annotation.label),node('p',annotation.basis,'note'));n.append(jev);}
   if(state.isRestricted(o))n.append(empty('정정 영향: 이 항목은 현재 설명에 사용할 수 없습니다. 재동기화가 필요합니다.'));
   if(o.type==='claim'||o.type==='hypothesis') {
     if(o.type==='claim')n.append(node('p',ObserverBriefing.factText(o)));
@@ -416,16 +485,49 @@ function questionSources() {
 }
 function timeCard(t) {
   const o=state.displayed.objects[t.source_ref.key];
-  const b=button(null,()=>openInspection(t.claim_refs.find(r=>state.displayed.objects[r.key]?.display_binding?.status==='bound')?.key||o.key),'time-card '+t.lane+(t.estimated?' estimated':''));
+  const bundle=ObserverBriefing.timelineBundle(t,state.displayed);
+  const interpretations=[];
+  for(const m of t.members||[t]){
+    const entry=ObserverBriefing.timelineBundle(m,state.displayed);
+    if(!interpretations.some(x=>x.target===entry.target&&x.reason===entry.reason))interpretations.push(entry);
+  }
+  const multiple=interpretations.length>1;
+  const cls='time-card '+t.lane+(t.estimated?' estimated':'');
+  const b=multiple?node('article',null,cls):button(null,()=>openInspection(bundle.target),cls);
   b.dataset.key=t.id;
-  b.append(badge(t.meaning,t.comparable?'':'warn'));
-  b.append(node('span',t.shape==='unknown'?'시각 미제공':t.shape==='candidates'?'복수 시각 후보':t.shape==='interval'?'연속 구간':t.estimated?'추정 시각':'기록된 값','time-basis'));
-  for(const raw of t.raw_values)b.append(node('span',raw??'미상','clock'));
-  if(!t.raw_values.length)b.append(node('span','배치할 시각 없음','clock'));
-  const claim=t.claim_refs.map(r=>state.displayed.objects[r.key]).find(c=>c?.display_binding?.status==='bound'&&c.validity==='adopted');
-  b.append(node('strong',claim?ObserverBriefing.factText(claim):t.title||o.title,'time-title'));
-  if(t.relevance_reason)b.append(node('span','포식이가 살펴보는 이유: '+t.relevance_reason,'time-reason'));
-  else b.append(node('span','이 단서가 사건과 어떻게 연결되는지는 아직 확인이 필요해요.','time-explanation'));
+  b.append(badge(t.group_kind==='file_clocks'?'파일 시각 · '+new Set(t.members.map(m=>m.meaning)).size+'종':t.meaning,t.comparable?'':'warn'));
+  if(t.lane==='file'&&!multiple&&o?.title){const path=node('span',o.title,'time-source');path.title=o.title;b.append(path);}
+  if(t.source_refs?.length>1)b.append(node('span','같은 파일의 원문 '+t.source_refs.length+'곳 · 파일 시각은 한 번만 표시','note'));
+  const clocks=t.group_kind==='file_clocks'?ObserverViewUtils.fileClockCells(t):[t];
+  const table=t.group_kind==='file_clocks'?node('table',null,'file-clock-grid'):null;
+  const tbody=table?node('tbody'):null;if(table)table.setAttribute('aria-label','파일 시간 · 원문 정밀도는 상세 참조');
+  let row;
+  for(const [i,clock] of clocks.entries()){
+    let container=b;
+    if(table){if(i%2===0){row=node('tr');tbody.append(row);}container=node('td');row.append(container);container.append(node('span',clock.label,'time-clock-kind'));}
+    if(clock.meanings){const kinds=node('span',clock.meanings.join(' / '),'time-clock-kind');
+      kinds.title=clock.assertions.map(a=>a.meaning+' — '+a.basis).join('\n');if(!table)container.append(kinds);}
+    const qualifier=clock.shape==='unknown'?'시각 미제공':clock.shape==='candidates'?'복수 시각 후보':clock.shape==='interval'?'연속 구간':clock.estimated?'추정 시각':null;
+    if(qualifier)container.append(node('span',qualifier,'time-basis'));
+    const displayed=new Map();
+    for(const raw of clock.raw_values){const label=ObserverViewUtils.clockText(raw),originals=displayed.get(label)||[];originals.push(raw);displayed.set(label,originals);}
+    for(const [label,originals] of displayed){const value=node('span',label,'clock');value.title=originals.map(raw=>raw??'미상').join('\n');container.append(value);}
+    if(clock.source_variants?.length>1)container.append(node('span',displayed.size===1?'원문 정밀도 차이':'출처별 시각 차이','time-basis'));
+    if(!clock.raw_values.length)container.append(node('span','배치할 시각 없음','clock'));
+  }
+  if(table){table.append(tbody);b.append(table);}
+  function appendInterpretation(container,entry){
+    container.append(node('strong',entry.text,'time-title'));
+    if(entry.reason)container.append(node('span','포식이가 살펴보는 이유: '+entry.reason,'time-reason'));
+    else container.append(node('span','이 단서가 사건과 어떻게 연결되는지는 아직 확인이 필요해요.','time-explanation'));
+  }
+  if(multiple){
+    b.append(node('strong',o?.title||'같은 파일에서 확인한 단서','time-title'));
+    const details=node('details');details.dataset.detail='time-'+t.id;
+    details.append(node('summary','연결된 설명 '+interpretations.length+'개 보기'));
+    for(const entry of interpretations){const link=button(null,()=>openInspection(entry.target),'time-interpretation');appendInterpretation(link,entry);details.append(link);}
+    b.append(details);
+  }else appendInterpretation(b,bundle);
   if(questionSources().has(t.source_ref.key))b.append(badge('선택 질문과 연결'));
   return b;
 }
@@ -433,15 +535,15 @@ function renderTimeline() {
   const sources=questionSources(),filter=$('timeline-filter').value;
   const list=state.displayed.timeline.filter(t=>filter==='all'||filter==='question'&&sources.has(t.source_ref.key)||filter==='core'&&t.core);
   const axis=clear('timeline'), other=clear('uncertain');
-  const comparable=list.filter(t=>t.comparable),uncertain=list.filter(t=>!t.comparable);
+  const comparable=ObserverViewUtils.timeGroups(list.filter(t=>t.comparable),state.displayed),uncertain=ObserverViewUtils.timeGroups(list.filter(t=>!t.comparable),state.displayed);
   for(const t of comparable.slice(0,timeLimit))axis.append(timeCard(t));
   for(const t of uncertain.slice(0,uncertainLimit))other.append(timeCard(t));
   const more=clear('timeline-more');
-  more.append(node('span','시간 단서 '+Math.min(timeLimit,comparable.length)+' / '+comparable.length+'개 · 실제 행동 횟수와는 달라요','note'));
+  more.append(node('span','시간축 카드 '+Math.min(timeLimit,comparable.length)+' / '+comparable.length+'개 · 같은 단서의 파일 시각은 묶어 보여드려요','note'));
   if(comparable.length>timeLimit)more.append(button('시간순으로 12개 더 보기',()=>{timeLimit+=12;renderTimeline();}));
   if(uncertain.length>uncertainLimit)other.append(button('미상·비교 불가 12개 더 보기',()=>{uncertainLimit+=12;renderTimeline();},'time-more'));
   if(!list.some(t=>t.comparable))axis.append(empty(filter==='core'?'아직 시각을 배치할 수 있는 핵심 사실이 없습니다. 전체 연결 원문은 필터에서 볼 수 있습니다.':'이 범위에 공통 축으로 배치할 수 있는 시각이 없습니다.'));
-  const count=list.filter(t=>!t.comparable).length;
+  const count=uncertain.length;
   $('uncertain-count').textContent='시각 미상 · 절대 시각 비교 불가 '+count+'개 항목';
   if(!count)other.append(node('p','선택 질문의 표시 범위에서 없음 · 전체 자료의 시각 검토 완료를 뜻하지 않음','note'));
 }
@@ -470,11 +572,17 @@ function render() {
   const ordinal=key?[...($(scope)||document).querySelectorAll('[data-key]')].filter(e=>e.dataset.key===key).indexOf(active):-1;
   const positions=[...document.querySelectorAll('[data-scroll]')].map(e=>[e.dataset.scroll,e.scrollTop,e.scrollLeft]);
   const opened=new Set([...document.querySelectorAll('details[open][data-detail]')].map(e=>e.dataset.detail));
-  renderSummary();renderNarrative();renderActivity();renderQuestions();renderQuestion();renderSelection();renderTimeline();renderReports();alerts();
+  renderSummary();renderNarrative();renderActivity();renderQuestions();renderQuestion();renderSelection();renderTimeline();renderReports();alerts();refreshPurposeSource();
   for(const e of document.querySelectorAll('details[data-detail]'))if(opened.has(e.dataset.detail))e.open=true;
   for(const [name,top,left] of positions){const el=[...document.querySelectorAll('[data-scroll]')].find(e=>e.dataset.scroll===name);if(el){el.scrollTop=top;el.scrollLeft=left;}}
   const target=key?[...($(scope)||document).querySelectorAll('[data-key]')].filter(e=>e.dataset.key===key)[Math.max(0,ordinal)]:id?$(id):null;
-  target?.focus({preventScroll:true});
+  if(target)target.focus({preventScroll:true});
+  else if(active&&active!==document.body&&!active.isConnected){
+    const visible=document.querySelector('dialog[open] button')||
+      [...document.querySelectorAll('.explanation-buttons button')].find(b=>!b.hidden&&!b.disabled)||$('guide-title');
+    if(visible=== $('guide-title'))visible.tabIndex=-1;
+    visible?.focus({preventScroll:true});
+  }
 }
 async function read(path){const r=await fetch(path,{cache:'no-store',credentials:'same-origin',redirect:'error',signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('화면 데이터 응답 '+r.status);return r.json();}
 async function synchronize() {
@@ -510,10 +618,13 @@ function updateLiveWork(){
   if(item?.id!==observedWork.id)observedWork={id:item?.id||null,since:now};
   const work=ObserverMoa.elapsedActivity(state.current,items,{available,now,observedSince:observedWork.since});
   line.textContent=work.text;line.title=work.timer_basis||'';
+  updateFeedback(available,now);
 }
 // A local display clock only: no fetch, snapshot mutation or model request.
 setInterval(()=>{if(!document.hidden)updateLiveWork();},1000);
 $('refresh').onclick=synchronize;
+$('purpose-source-close').onclick=()=>{$('purpose-source-dialog').close();purposeSource=null;};
+$('purpose-source-dialog').addEventListener('close',()=>{purposeSource=null;});
 $('explanation-older').onclick=()=>navigateExplanation(1);
 $('explanation-newer').onclick=()=>navigateExplanation(-1);
 $('explanation-current').onclick=()=>navigateExplanation(null);

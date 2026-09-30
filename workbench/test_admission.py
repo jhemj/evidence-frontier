@@ -7,7 +7,7 @@ or establish historical execution. No evidence commands are executed here.
 from .models import TestDesign
 from .retrieval import fingerprint_scope
 
-VERSION = 'test-admission-1'
+VERSION = 'test-admission-2'
 CAPABILITIES = {
     'search': ('matching_records','source_content'),
     'read_source': ('source_content',),
@@ -23,8 +23,11 @@ def catalog(platform='linux'):
     return {tool:list(CAPABILITIES[tool]) for tool in names}
 
 
-def assess(call, platform='linux', observation_ids=()):
-    design=TestDesign.model_validate(call.get('test_design') or {}).model_dump()
+def assess(call, platform='linux', observation_ids=(), *, source_locators=(),policy='legacy',context=None,current_context=None):
+    from .test_contract_v2 import POLICY,is_v2,admit
+    if policy==POLICY or is_v2(call.get('test_design')):
+        return admit(call,context,current_context,catalog(platform))
+    design=TestDesign.model_validate(call.get('test_design') or {}).model_dump(exclude_none=True)
     tool=call.get('tool');capabilities=catalog(platform)
     # Old persisted proposals have no design. Their operation remains a
     # discovery only; never claim that legacy free prose passed this gate.
@@ -32,11 +35,15 @@ def assess(call, platform='linux', observation_ids=()):
     if legacy and tool in capabilities:
         design['immediate_observable']=capabilities[tool][0]
     missing=sorted(set(design['required_observation_ids']+design['baseline_observation_ids'])-set(observation_ids))
+    from .locator_admission import check
+    binding=check(call,source_locators) if platform=='linux' else None
     reason=('unsupported_tool' if tool not in capabilities else
             'required_input_unavailable' if missing else
-            'capability_intent_mismatch' if design['immediate_observable'] not in capabilities[tool] else None)
+            'capability_intent_mismatch' if design['immediate_observable'] not in capabilities[tool] else
+            binding['reason'] if binding and binding['status']=='contradicted' else None)
     return {'version':VERSION,'eligible':reason is None,'reason':reason,'design':design,
             'missing_observation_ids':missing,'legacy_untyped':legacy,
+            'source_object_binding':binding,
             'scope':'Immediate observable feasibility only; no semantic truth, budget or permission expansion.'}
 
 

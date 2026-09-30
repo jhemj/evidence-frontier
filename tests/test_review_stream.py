@@ -203,7 +203,9 @@ def test_irreducible_final_scope_is_explicit_gap_not_partial_page_adoption(tmp_p
         finish(c,cid,e,t)
         if c.store.get(b['id'])['status']=='input_projection_blocked':break
     assert c.store.get(b['id'])['status']=='input_projection_blocked'
-    assert c.store.get(b['id'])['attempts']==2
+    # B1 diagnoses an irreducible obligation floor before scheduling another
+    # focus/model attempt. Original accepted page notes are still unpublished.
+    assert c.store.get(b['id'])['attempts']==0
     assert not c.store.get(d['id']).get('finding')
     assert all(p['status']=='reviewed' for p in c.store.list('review_page',cid) if not p.get('focus_of'))
     assert all(p['status']=='pending' for p in c.store.list('review_page',cid) if p.get('focus_of'))

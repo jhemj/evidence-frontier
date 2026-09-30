@@ -23,7 +23,7 @@ def model_view_size(pack):
     return len(serialize(encode(encode_text(ReferenceProjection(pack).encode(pack)))))
 
 
-def model_view_breakdown(pack):
+def model_view_breakdown(pack,*,request_spec=None):
     """Measure the SAME transport, not raw bytes, tokens, or semantic progress.
 
     Per-key values exclude their key/delimiter overhead; the residual includes
@@ -39,9 +39,15 @@ def model_view_breakdown(pack):
                 if key in ('observations','page_review_notes','executed_checks',
                            'question_context','open_objections','literal_fact_candidates')}
     total=len(serialize(projected))
-    return {'unit':'characters','transport_total':total,'components':components,
+    result={'unit':'characters','transport_total':total,'components':components,
             'other_and_envelope':total-sum(components.values()),
             'cost_kind':'serialized components; not additive marginal costs or provider tokens'}
+    if request_spec is not None:
+        from .request_compiler import compile_spec
+        compiled=compile_spec(request_spec,pack)
+        result['compiled_request']=compiled.identity
+        result['request_budget']=compiled.budget
+    return result
 
 
 def bounded(value, text=800, items=6):
@@ -435,7 +441,7 @@ def expand_check_requests(pack):
     pack.pop('check_request_definitions_scope',None)
 
 
-def fit_metadata_only(pack, maximum=36000):
+def fit_metadata_only(pack, maximum=36000,*,request_spec=None):
     """Create a reversible, metadata-only model view or raise for paging.
 
     Unlike :func:`fit`, this never truncates, samples, or projects evidence,
@@ -447,18 +453,25 @@ def fit_metadata_only(pack, maximum=36000):
     from .structured_context import group
     group(pack)
     size=lambda:len(serialize(pack))
-    if size()<=maximum:return
-    if model_view_size(pack)<=maximum:return
+    compiled=None
+    def acceptable():
+        nonlocal compiled
+        if request_spec is not None:
+            from .request_compiler import compile_spec
+            compiled=compile_spec(request_spec,pack)
+            if compiled.budget['estimated_headroom']<0:return False
+        return size()<=maximum or model_view_size(pack)<=maximum
+    if acceptable():return compiled
     share_metadata(pack)
     share_contract_conditions(pack)
     share_observation_context_requests(pack)
     share_observation_fields(pack, include_repeated_identity=True)
     share_check_requests(pack)
     share_observation_path_defaults(pack)
-    if size()<=maximum:return
-    # Do not reject a lossless view merely because its retained ledger IDs are
-    # longer than the handles actually sent. Source strings are unchanged.
-    if model_view_size(pack)<=maximum:return
+    if acceptable():return compiled
+    if compiled is not None and compiled.budget['estimated_headroom']<0:
+        from .request_compiler import RequestBudgetError
+        raise RequestBudgetError(compiled)
     largest=sorted(((key,len(serialize(value))) for key,value in pack.items()),
                    key=lambda row:row[1],reverse=True)[:6]
     raise InputBudgetError('Lossless metadata envelope exceeds input budget; page or reselect without dropping source fields. '

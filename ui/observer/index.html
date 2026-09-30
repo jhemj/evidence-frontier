@@ -2,16 +2,16 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>보위대한 포식이</title>
+  <title>forsic · 포식이 조사실</title>
   <link rel="stylesheet" href="/observer.css">
   <link rel="stylesheet" href="/moa.css">
   <link rel="stylesheet" href="/gray-theme.css">
-  <script src="/state.js" defer></script><script src="/renderer.js" defer></script><script src="/briefing.js" defer></script><script src="/moa.js" defer></script><script src="/observer.js" defer></script>
+  <script src="/state.js" defer></script><script src="/renderer.js" defer></script><script src="/briefing.js" defer></script><script src="/moa.js" defer></script><script src="/view-utils.js" defer></script><script src="/observer.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#guide-title">포식이의 설명으로 이동</a>
 <header class="topbar">
-  <div class="brand"><span class="brand-mark" aria-hidden="true">f</span>frontier <span class="edition">OBSERVER</span></div>
+  <div class="brand"><span class="brand-mark" aria-hidden="true">f</span>forsic <span class="edition">OBSERVER</span></div>
   <div class="context"><span id="mode" class="tag">불러오는 중</span><span id="case-name">포식이 조사실</span><span id="run-name" class="muted"></span></div>
   <button id="reports-open" type="button">보고서 <span id="report-count">—</span></button>
 </header>
@@ -24,21 +24,52 @@
     <button id="pin" type="button" aria-pressed="false">지금 내용 고정</button>
   </section>
   <section class="workspace scene" id="workspace" aria-labelledby="guide-title">
-    <div class="panel-heading scene-heading"><div><span class="eyebrow">POSIK / INVESTIGATION</span><h2 id="guide-title">포식이의 조사 브리핑</h2></div><div class="scene-actions"><button id="inspection-open" type="button">가설·근거 보기</button><button id="work-open" type="button">작업 이력</button><button id="guide-size" type="button" aria-label="설명 영역 크기 전환">설명 넓게</button></div></div>
-    <nav class="explanation-nav" aria-label="포식이의 설명 넘겨 보기">
+    <div class="panel-heading scene-heading"><div><span class="eyebrow">POSIK / INVESTIGATION</span><h2 id="guide-title">포식이의 조사 브리핑</h2></div><div class="scene-actions"><button id="inspection-open" type="button">가설·근거 보기</button><button id="work-open" type="button">포식이가 한 일</button><button id="guide-size" type="button" aria-label="설명 영역 크기 전환">설명 넓게</button></div></div>
+    <details class="investigation-explanation" data-detail="investigation-explanation"><summary id="hypothesis-summary-label">살펴보는 가능성과 이유</summary><div id="hypothesis-bubbles" class="bubble-stack" aria-label="포식이가 검토하는 설명"></div></details>
+    <nav class="explanation-nav" aria-label="포식이가 한 작업 넘겨 보기">
       <div><strong id="explanation-position">현재 설명</strong><span id="explanation-at" class="muted"></span></div>
-      <div class="explanation-buttons"><button id="explanation-older" type="button" disabled>← 이전 설명</button><button id="explanation-newer" type="button" disabled>다음 설명 →</button><button id="explanation-current" type="button" hidden>현재 설명으로</button></div>
+      <div class="explanation-buttons"><button id="explanation-older" type="button" disabled>← 이전 작업</button><button id="explanation-newer" type="button" disabled>다음 작업 →</button><button id="explanation-current" type="button" hidden>지금 하는 작업</button></div>
     </nav>
     <p id="explanation-history-note" class="note" hidden></p>
+    <div class="work-bubbles" aria-label="이전 결과와 현재 조사">
+      <article id="previous-work" class="previous-work" aria-label="이전 조사 결과"></article>
+      <article id="guide-work" class="current-work" aria-label="현재 조사 중"></article>
+    </div>
     <div class="thought-scene">
-      <div id="hypothesis-bubbles" class="bubble-stack" aria-label="포식이가 검토하는 설명"></div>
       <section class="guide" aria-label="포식이와 현재 조사 상태">
         <div class="guide-intro"><div class="moa" role="img" aria-label="포식이, 조사 안내자" data-base="idle" data-level="undetermined" data-motion="false">
           <svg viewBox="0 0 240 200" aria-hidden="true" focusable="false">
+            <g class="moa-archive">
+              <g class="moa-paper-pile left">
+                <path class="moa-stack-shadow" d="M7 177 L62 177 L62 184 L7 184Z"/>
+                <rect x="8" y="140" width="44" height="36" rx="3"/>
+                <rect x="13" y="128" width="44" height="40" rx="3"/>
+                <rect x="6" y="113" width="44" height="45" rx="3"/>
+                <rect x="13" y="95" width="39" height="48" rx="3"/>
+                <path d="M20 106 H44 M20 113 H40 M20 120 H44 M20 127 H35"/>
+              </g>
+              <g class="moa-paper-pile right">
+                <path class="moa-stack-shadow" d="M186 177 L232 177 L232 184 L186 184Z"/>
+                <rect x="186" y="137" width="44" height="39" rx="3"/>
+                <rect x="192" y="119" width="40" height="46" rx="3"/>
+                <rect x="185" y="101" width="40" height="48" rx="3"/>
+                <rect x="191" y="83" width="39" height="48" rx="3"/>
+                <path d="M198 94 H221 M198 101 H217 M198 108 H221 M198 115 H213"/>
+              </g>
+              <g class="moa-loose-page one"><path d="M21 42 H43 L51 50 V80 H21Z"/><path d="M43 42 V50 H51 M27 57 H44 M27 64 H41 M27 71 H43"/></g>
+              <g class="moa-loose-page two"><path d="M189 24 H210 L217 31 V59 H189Z"/><path d="M210 24 V31 H217 M195 38 H211 M195 45 H207 M195 52 H211"/></g>
+            </g>
             <ellipse class="moa-shadow" cx="120" cy="179" rx="48" ry="5"/>
             <g class="moa-creature">
+              <g class="moa-lens-rim">
+                <circle class="moa-lens-outer" cx="120" cy="108" r="73"/>
+                <circle class="moa-lens-groove" cx="120" cy="108" r="69"/>
+                <path class="moa-lens-grip" d="M120 36 V40 M120 176 V180 M48 108 H52 M188 108 H192 M69 57 L72 60 M168 156 L171 159 M69 159 L72 156 M168 60 L171 57"/>
+                <path class="moa-lens-glint" d="M68 63 A69 69 0 0 1 106 40 M147 173 A69 69 0 0 0 171 155"/>
+              </g>
               <circle class="moa-body" cx="120" cy="108" r="64"/>
               <path class="moa-highlight" d="M71 84 Q78 66 94 63"/>
+              <path class="moa-lens-reflection" d="M66 119 A55 55 0 0 0 146 154"/>
               <g class="moa-face">
                 <g class="moa-eye left"><ellipse cx="98" cy="108" rx="9" ry="12"/><circle class="moa-pupil" cx="100" cy="103" r="3"/><circle class="moa-spark" cx="95" cy="113" r="1.5"/></g>
                 <g class="moa-eye right"><ellipse cx="142" cy="108" rx="9" ry="12"/><circle class="moa-pupil" cx="144" cy="103" r="3"/><circle class="moa-spark" cx="139" cy="113" r="1.5"/></g>
@@ -62,19 +93,20 @@
               <g class="moa-question"><path d="M183 43 C182 33 199 30 201 40 C202 47 192 47 192 54"/><circle cx="192" cy="61" r="2"/></g>
               <g class="moa-sparkles"><path d="M49 59 L52 66 L59 69 L52 72 L49 79 L46 72 L39 69 L46 66Z M187 42 L190 48 L196 51 L190 54 L187 60 L184 54 L178 51 L184 48Z"/></g>
               <g class="moa-pencil"><path d="M183 50 L201 32 L207 38 L189 56 L181 58Z"/><path d="M183 50 L189 56 M198 35 L204 41"/></g>
+              <path class="moa-sweat" d="M174 72 Q166 81 174 84 Q182 81 174 72Z"/>
             </g>
           </svg>
         </div><strong>포식이</strong></div>
         <div class="moa-verdict"><span id="moa-verdict">침해 여부는 아직 판단 전</span><p id="moa-verdict-scope" class="note" hidden></p><button id="moa-verdict-detail" type="button" hidden>판단 근거 보기</button></div>
-        <div id="guide-work" class="current-work"></div>
         <details class="renderer-settings"><summary>안내자 설정</summary><p id="renderer-status" class="note">로컬 SVG 안내자</p><button id="hide-moa" type="button" aria-pressed="false">캐릭터 숨김</button><label><input id="motion" type="checkbox" checked> 표정·동작 켜기</label><button id="moa-preview-open" type="button">표정·동작 미리보기</button></details>
       </section>
-      <div class="bubble-stack"><div id="narrative"></div><section class="next-discriminator"><h3>무엇을 확인하면 판단이 달라질까요?</h3><div id="next-discriminator"></div></section></div>
+      <aside id="guide-feedback" class="work-feedback" aria-label="최근 확인하지 못한 작업" hidden></aside>
+      <div hidden><div id="narrative"></div><div id="next-discriminator"></div></div>
     </div>
   </section>
   <section class="timeline-section" aria-labelledby="timeline-title">
     <div class="panel-heading"><div><span class="eyebrow">EVIDENCE / TIME</span><h2 id="timeline-title">사건 시간축</h2></div><div class="timeline-controls"><select id="timeline-filter" aria-label="시간축 표시 범위"><option value="core">사건 전체 · 핵심</option><option value="all">사건 전체 · 모든 연결 원문</option><option value="question">선택한 질문</option></select><button id="timeline-layout" type="button" aria-pressed="false">목록으로 보기</button></div></div>
-    <p class="note">핵심 단서를 시간순으로 보여드려요. 파일 시간은 실제 행동 시간과 다르고, 추정 시간은 따로 표시해요.</p>
+    <p class="note">시각은 KST로 보여드려요. 파일 시간은 실제 행동 시간과 다르고, 추정·시간대 미상은 따로 표시해요.</p>
     <div id="timeline" class="timeline" data-scroll="timeline"></div>
     <div id="timeline-more" class="timeline-more"></div>
     <details class="uncertain-time"><summary id="uncertain-count">시각 미상 · 절대 시각 비교 불가</summary><div id="uncertain"></div></details>
@@ -88,12 +120,16 @@
   <div class="question-layout"><nav id="questions" class="question-list" aria-label="전체 조사 질문" data-scroll="questions"></nav><div class="question-body" data-scroll="question-body"><div id="question-detail"></div><section id="selection" class="selection" aria-label="선택 항목 상세"></section></div></div>
 </dialog>
 <dialog id="work-dialog" aria-labelledby="work-title">
-  <div class="panel-heading"><h2 id="work-title">작업 이력과 판단 변경</h2><button id="work-close" type="button">닫기</button></div>
+  <div class="panel-heading"><h2 id="work-title">포식이가 한 일과 알아낸 내용</h2><button id="work-close" type="button">닫기</button></div>
   <section class="work-now"><h3>보존된 작업 상태</h3><div id="activity"></div></section>
-  <details id="work-history"><summary>전체 작업 이력</summary><label>상태 <select id="activity-filter"><option value="all">전체</option><option value="active">대기·실행</option><option value="failed">실패</option><option value="finished">종료</option></select></label><div id="history" class="history" data-scroll="history"></div></details>
+  <details id="work-history"><summary>작업 이력</summary><p class="note">현재 화면에 연결된 보존 작업을 한곳에서 보여드려요. 넘겨 보기는 최근 200개까지이며, 전체 원장이나 독립 증거의 개수는 아니에요.</p><label>상태 <select id="activity-filter"><option value="all">전체</option><option value="active">대기·실행</option><option value="failed">실패</option><option value="finished">종료</option></select></label><div id="history" class="history" data-scroll="history"></div></details>
   <section><h3>판단 변경</h3><p id="last-progress" class="note"></p><div id="changes"></div></section>
 </dialog>
 <dialog id="reports-dialog" aria-labelledby="reports-title"><div class="panel-heading"><h2 id="reports-title">보존된 보고서</h2><button id="reports-close" type="button">닫기</button></div><div id="reports"></div></dialog>
+<dialog id="purpose-source-dialog" aria-labelledby="purpose-source-title">
+  <div class="panel-heading"><h2 id="purpose-source-title">설명에 나온 단서 원문</h2><button id="purpose-source-close" type="button">닫기</button></div>
+  <p id="purpose-source-freshness" class="note"></p><div id="purpose-source-body" class="selection"></div>
+</dialog>
 <dialog id="moa-preview-dialog" aria-labelledby="moa-preview-title">
   <div class="panel-heading"><h2 id="moa-preview-title">포식이의 표정·동작</h2><button id="moa-preview-close" type="button">닫기</button></div>
   <p class="note">캐릭터 동작 예시예요. 실제 조사 상태는 바뀌지 않아요.</p>

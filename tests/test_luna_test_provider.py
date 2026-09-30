@@ -89,6 +89,19 @@ def test_timeout_is_killed_and_rejected(tmp_path, monkeypatch):
     assert caught.value.metadata['process_started'] is True
 
 
+def test_callback_failure_reaps_started_cli_without_retry(tmp_path,monkeypatch):
+    processes=[]
+    factory=fake_popen_factory(b'')
+    def popen(*args,**kwargs):
+        process=factory(*args,**kwargs);processes.append(process);return process
+    def failing_sink(*args,**kwargs):raise RuntimeError('fixture sink unavailable')
+    monkeypatch.setattr(luna,'_cli_version',lambda:'codex fixture')
+    monkeypatch.setattr(luna.subprocess,'Popen',popen)
+    with pytest.raises(RuntimeError,match='fixture sink unavailable'):
+        luna.infer([],{},tmp_path,emit=failing_sink)
+    assert len(processes)==1 and processes[0].returncode==-9
+
+
 @pytest.mark.parametrize('stderr',[False,True])
 def test_discovery_failure_is_pre_delivery_service_error(tmp_path,monkeypatch,stderr):
     from workbench.provider import ModelServiceError

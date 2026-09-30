@@ -103,7 +103,7 @@ for(const title of ['integrity','inventory','normalize','timeline','crosscheck',
   const x=m.activity(v,[{title,state:'running',kind:'task'}]);
   a.ok(x.label&&x.why&&x.meaning,title);a.notEqual(x.base,'idle');
 }
-a.equal(m.activity(v,[{title:'linux_scan',state:'running',kind:'task'}]).base,'searching');
+a.equal(m.activity(v,[{title:'linux_scan',state:'running',kind:'task'}]).base,'gathering');
 a.equal(m.activity(v,[{state:'input_registered',kind:'model'}]).base,'waiting');
 a.equal(m.activity(v,[]).base,'idle');
 a.equal(m.activity(v,[],{available:false}).base,'offline');
@@ -171,7 +171,7 @@ const job={id:'J',kind:'tool',state:'running',title:'search',target:'example',ti
 a.equal(m.elapsedActivity(v,[job],{now}).text,'32초째 ‘example’를 검색하고 있어요.');
 const dispatch={...job,state:'waiting',timer_origin:'dispatch'};
 const waiting=m.elapsedActivity(v,[dispatch],{now});
-a.ok(waiting.text.startsWith('요청 후 32초'));a.ok(waiting.text.includes('기다리고'));
+a.ok(waiting.text.startsWith('요청 후 32초'));a.ok(waiting.text.includes('결과를 확인'));
 a.ok(!waiting.text.includes('검색하고 있어요'));
 const prepared={id:'M',kind:'model',state:'input_registered',target:'단서 A',timer_at:at,timer_origin:'input_registered'};
 a.ok(m.elapsedActivity(v,[prepared],{now}).text.startsWith('입력 준비 후 32초'));
@@ -185,7 +185,7 @@ a.ok(m.elapsedActivity(v,[{...job,timer_at:'bad'}],{now}).timer_basis.includes('
 """,ROOT/'ui/observer/moa.js')
     html=(ROOT/'ui/observer/index.html').read_text()
     assert '모아' not in html and '포식이' in html
-    assert '<title>보위대한 포식이</title>' in html
+    assert '<title>forsic · 포식이 조사실</title>' in html
     js=(ROOT/'ui/observer/observer.js').read_text()
     tick=js.split('function updateLiveWork(){')[1].split("$('refresh').onclick")[0]
     assert 'fetch(' not in tick and 'synchronize(' not in tick and 'state.accept(' not in tick

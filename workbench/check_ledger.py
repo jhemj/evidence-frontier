@@ -34,6 +34,10 @@ def project(jobs, batches):
             if not any(x['dossier_id']==c['dossier_id'] and x['contract_id']==c['contract_id'] for x in row['contracts']):
                 row['contracts'].append({**c,'assessment':None,'evaluation_status':'unassessed'})
             if deferred['reason'] not in row['reasons']:row['reasons'].append(deferred['reason'])
+            if c.get('contract_version')==2 and deferred['reason'] in (
+                    'invalid_test_design','contract_encoding_error','schema_encoding','capability_mismatch',
+                    'internal_reference_error','presentation_requirement_unmet'):
+                row['material_class']='internal_contract_or_presentation'
     checks=[dict(scope_key=k,**v) for k,v in sorted(rows.items())]
     return {'checks':checks,'unique_scopes':len(checks),
         'not_executed':sum(not c['job_ids'] for c in checks),

@@ -149,7 +149,7 @@ function renderCockpit(s) {
   renderScenarios(s);
   const latest=s.report?.filter(r=>r.reader_contract).at(-1);
   $('live-report').innerHTML=`<span class="report-symbol">▤</span><span><strong>현재까지의 보고서</strong><small>${latest?'저장본 있음 · 최신 초안 확인':'조사와 함께 작성 중'}</small></span><span>↗</span>`;
-  $('companion-state').textContent=['running','pause_requested'].includes(s.case.status)?'에이전트 조사 중':'Frontier';
+  $('companion-state').textContent=['running','pause_requested'].includes(s.case.status)?'에이전트 조사 중':'forsic';
   if (companionView==='report' && !selectedReport && reportLoadedRevision!==(s.report_scope_revision ?? s.view_revision) && !reportLoading && Date.now()>=reportNextRefreshAt) {
     perform(()=>loadReport());
   }

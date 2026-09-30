@@ -53,7 +53,7 @@ def render(view):
     doc.add_paragraph(view['reader_name']+' · '+view['status'])
     meta=doc.add_paragraph('기준시각 '+view['generated_at']+'\n보고서 '+view['report_id'],'Caption')
     meta.paragraph_format.space_after=Pt(8)
-    header=section.header.paragraphs[0];header.text='Evidence Frontier · '+view['reader_name']
+    header=section.header.paragraphs[0];header.text='forsic · '+view['reader_name']
     header.style=doc.styles['Caption'];header.alignment=WD_ALIGN_PARAGRAPH.RIGHT
     footer=section.footer.paragraphs[0];footer.alignment=WD_ALIGN_PARAGRAPH.CENTER
     footer.style=doc.styles['Caption'];footer.add_run('기준시각 현재 · ')

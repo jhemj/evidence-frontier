@@ -11,10 +11,29 @@
 .moa[data-level=stale]{--moa-fill:#c4d0d5;--moa-line:#586b75;--moa-accent:#91a3aa}
 .moa-body{fill:var(--moa-fill);stroke:var(--moa-line);stroke-opacity:.45;stroke-width:1.5;transition:fill .7s ease,stroke .7s ease}
 .moa-highlight{fill:none;stroke:white;stroke-width:6;stroke-linecap:round;opacity:.65}
+.moa-lens-outer{fill:#cfd3d9;stroke:#4f5661;stroke-width:2.5}
+.moa-lens-groove{fill:none;stroke:#939ba6;stroke-width:2}
+.moa-lens-grip{fill:none;stroke:#646d79;stroke-width:2;stroke-linecap:round}
+.moa-lens-glint{fill:none;stroke:#fff;stroke-width:2.5;stroke-linecap:round;opacity:.85}
+.moa-lens-reflection{fill:none;stroke:#fff;stroke-width:1.5;stroke-linecap:round;opacity:.28}
+.moa-archive,.moa-sweat{display:none}
+.moa-paper-pile rect,.moa-loose-page path:first-child{fill:#f6f7f9;stroke:#9ba3ad;stroke-width:1.5}
+.moa-paper-pile path:not(.moa-stack-shadow),.moa-loose-page path+path{fill:none;stroke:#b3bac3;stroke-width:1.5;stroke-linecap:round}
+.moa-stack-shadow{fill:#9ba3ad;opacity:.16}
+.moa-loose-page{transform-box:fill-box;transform-origin:center}
+.moa-loose-page.one{transform:rotate(-13deg)}.moa-loose-page.two{transform:rotate(12deg)}
+.moa-sweat{fill:#e5f5ff;stroke:var(--moa-line);stroke-width:1;opacity:.75}
+.moa[data-base=gathering] .moa-archive,.moa[data-base=gathering_waiting] .moa-archive{display:block}
+.moa[data-base=gathering] .moa-glass,.moa[data-base=gathering] .moa-sweat{display:block}
+.moa[data-base=gathering] .moa-brow,.moa[data-base=gathering] .moa-mouth-thought{display:block}
+.moa[data-base=gathering] .moa-mouth{display:none}
+.moa[data-base=gathering_waiting] .moa-clock,.moa[data-base=gathering_waiting] .moa-wait{display:block}
 .moa-shadow{fill:#7c8d9e;opacity:.13}.moa-arm{fill:none;stroke:var(--moa-line);stroke-width:4;stroke-linecap:round}
 .moa-eye ellipse{fill:var(--moa-line)}.moa-pupil{fill:#fff}.moa-spark{fill:#fff;opacity:.55}
 .moa-brow,.moa-mouth,.moa-mouth-thought{fill:none;stroke:var(--moa-line);stroke-width:2.5;stroke-linecap:round}
 .moa-brow,.moa-mouth-thought{display:none}.moa-brow{stroke-width:2;opacity:.6}.moa-cheek{fill:#e29aa7;opacity:.38}
+/* Rotate each eyebrow around itself, never around the SVG viewport origin. */
+.moa-brow{transform-box:fill-box;transform-origin:center}
 .moa-glass{display:none}.moa-glass>path,.moa-glass>circle{fill:#effbff;fill-opacity:.55;stroke:var(--moa-line);stroke-width:3}.moa-glass .moa-glass-glint{fill:none;stroke:white;stroke-width:2;opacity:.8}
 .moa-notes{display:none}.moa-notes rect{fill:#fffaf0;stroke:var(--moa-line);stroke-width:2}.moa-notes path{stroke:var(--moa-accent);stroke-width:2}
 .moa-happy-eye,.moa-mouth-happy,.moa-mouth-surprised,.moa-thought-dots,.moa-clock,.moa-pages,.moa-question,.moa-sparkles,.moa-pencil{display:none}
@@ -24,13 +43,20 @@
 .moa-clock circle,.moa-pages rect{fill:#fff;stroke:var(--moa-line);stroke-width:2}
 .moa-clock path,.moa-pages path,.moa-question path{fill:none;stroke:var(--moa-line);stroke-width:2;stroke-linecap:round}
 .moa-question circle{fill:var(--moa-line)}.moa-pencil path:first-child{fill:#f8e2a8;stroke:var(--moa-line);stroke-width:1.5}.moa-pencil path+path{fill:none;stroke:var(--moa-line);stroke-width:1.5}
-.moa-wait{display:none;fill:var(--moa-line);opacity:.6}.moa-creature,.moa-face,.moa-eye,.moa-pupil,.moa-hand{transform-box:fill-box;transform-origin:center}
+.moa-wait{display:none;fill:var(--moa-line);opacity:.6}.moa-creature,.moa-face,.moa-eye,.moa-pupil,.moa-hand,.moa-notes,.moa-pages,.moa-question,.moa-pencil{transform-box:fill-box;transform-origin:center}
 .moa[data-base=searching] .moa-glass{display:block}.moa[data-base=searching] .moa-pupil{transform:translate(1px,-1px)}
 .moa[data-base=thinking] .moa-mouth,.moa[data-base=concerned] .moa-mouth,.moa[data-base=offline] .moa-mouth,.moa[data-level=confirmed] .moa-mouth{display:none}
 .moa[data-base=thinking] .moa-mouth-thought,.moa[data-base=concerned] .moa-mouth-thought,.moa[data-base=offline] .moa-mouth-thought,.moa[data-level=confirmed] .moa-mouth-thought{display:block}
 .moa[data-base=thinking] .moa-brow,.moa[data-base=concerned] .moa-brow{display:block}.moa[data-base=thinking] .moa-brow.left{transform:rotate(-12deg)}
 .moa[data-base=concerned] .moa-brow.left{transform:rotate(-15deg)}.moa[data-base=concerned] .moa-brow.right{transform:rotate(15deg)}
+.moa[data-base=concerned] .moa-sweat{display:block}
+.moa[data-transient=disappointed] .moa-brow,.moa[data-transient=disappointed] .moa-mouth-thought,.moa[data-transient=disappointed] .moa-sweat{display:block}
+.moa[data-transient=disappointed] .moa-mouth{display:none}
+.moa[data-transient=disappointed] .moa-brow.left{transform:rotate(-15deg)}.moa[data-transient=disappointed] .moa-brow.right{transform:rotate(15deg)}
+.moa[data-motion=true][data-transient=disappointed] .moa-creature{animation:moa-disappointed 1.2s ease-in-out 2}
+@keyframes moa-disappointed{0%,100%{transform:translateY(0) rotate(0)}35%{transform:translateY(5px) rotate(-3deg)}70%{transform:translateY(4px) rotate(2deg)}}
 .moa[data-base=organizing] .moa-notes{display:block}.moa[data-base=waiting] .moa-wait{display:block}
+.moa[data-base=organizing] .moa-pencil{display:block}
 .moa[data-base=thinking] .moa-thought-dots,.moa[data-base=waiting] .moa-clock,.moa[data-base=working] .moa-pages,.moa[data-base=concerned] .moa-question{display:block}
 .moa[data-transient=counterpoint] .moa-thought-dots{display:none}.moa[data-transient=counterpoint] .moa-question{display:block}
 .moa[data-transient=corrected] .moa-pencil{display:block}
@@ -44,11 +70,31 @@
 .moa[data-motion=true]:not([data-base=ended]):not([data-base=offline]) .moa-creature{animation:moa-breathe 3.6s ease-in-out infinite}
 .moa[data-motion=true] .moa-eye{animation:moa-blink 6.5s ease-in-out infinite}
 .moa[data-motion=true][data-base=searching] .moa-hand{animation:moa-search 2.8s ease-in-out infinite}
+.moa[data-motion=true][data-base=searching] .moa-creature{animation:moa-look-around 4.2s ease-in-out infinite}
+.moa[data-motion=true][data-base=searching] .moa-pupil{animation:moa-scan-eyes 4.2s ease-in-out infinite}
 .moa[data-motion=true][data-base=thinking] .moa-pupil{animation:moa-think 4.8s ease-in-out infinite}
 .moa[data-motion=true][data-base=organizing] .moa-notes{animation:moa-notes 2.5s ease-in-out infinite}
+.moa[data-motion=true][data-base=organizing] .moa-creature{animation:moa-note-nod 3s ease-in-out infinite}
+.moa[data-motion=true][data-base=organizing] .moa-pencil{animation:moa-write 1.8s ease-in-out infinite}
 .moa[data-motion=true][data-base=waiting] .moa-wait{animation:moa-wait 2.5s ease-in-out infinite}
 .moa[data-motion=true][data-base=thinking] .moa-creature{animation:moa-ponder 4s ease-in-out infinite}
 .moa[data-motion=true][data-base=working] .moa-pages{animation:moa-notes 2.2s ease-in-out infinite}
+.moa[data-motion=true][data-base=working] .moa-creature{animation:moa-compare 4s ease-in-out infinite}
+.moa[data-motion=true][data-base=working] .moa-pupil{animation:moa-scan-eyes 4s ease-in-out infinite}
+.moa[data-motion=true][data-base=concerned] .moa-creature{animation:moa-baffled 4.4s ease-in-out infinite}
+.moa[data-motion=true][data-base=concerned] .moa-question{animation:moa-question-bob 3s ease-in-out infinite}
+.moa[data-motion=true][data-base=waiting] .moa-clock path,.moa[data-motion=true][data-base=gathering_waiting] .moa-clock path{transform-box:view-box;transform-origin:194px 63px;animation:moa-clock-check 3s ease-in-out infinite}
+.moa[data-motion=true][data-transient=updated]:not([data-level=confirmed]) .moa-creature{animation:moa-notice 2.7s ease-in-out infinite}
+.moa[data-motion=true][data-transient=corrected] .moa-pencil{animation:moa-write 1.8s ease-in-out infinite}
+.moa[data-motion=true][data-transient=counterpoint] .moa-question{animation:moa-question-bob 3s ease-in-out infinite}
+.moa[data-motion=true][data-base=gathering] .moa-creature{animation:moa-rummage 5.2s ease-in-out infinite}
+.moa[data-motion=true][data-base=gathering] .moa-hand{animation:moa-search 2.4s ease-in-out infinite}
+.moa[data-motion=true][data-base=gathering] .moa-pupil{animation:moa-scan-eyes 5.2s ease-in-out infinite}
+.moa[data-motion=true][data-base=gathering] .moa-loose-page.one{animation:moa-page-sort 5.2s ease-in-out infinite}
+.moa[data-motion=true][data-base=gathering] .moa-loose-page.two{animation:moa-page-sort-back 5.2s ease-in-out infinite}
+.moa[data-motion=true][data-base=gathering] .moa-sweat{animation:moa-wait 5.2s ease-in-out infinite}
+/* Unobserved worker requests keep the stacks and clock, not active page sorting. */
+.moa[data-motion=true][data-base=gathering_waiting] .moa-wait{animation:moa-wait 2.5s ease-in-out infinite}
 .moa[data-motion=true][data-transient=happy]:not([data-level=confirmed]) .moa-creature{animation:moa-happy 1.6s ease-in-out infinite}
 .moa[data-motion=true] .moa-sparkles{animation:moa-wait 2s ease-in-out infinite}
 .moa[data-motion=false] *, .moa[data-base=ended] *, .moa[data-base=offline] *{animation:none!important}
@@ -62,5 +108,17 @@
 @keyframes moa-wait{0%,100%{opacity:.25}50%{opacity:.8}}
 @keyframes moa-ponder{0%,100%{transform:rotate(0)}40%,65%{transform:rotate(-5deg) translateY(-2px)}}
 @keyframes moa-happy{0%,100%{transform:translateY(0)}45%{transform:translateY(-7px) rotate(3deg)}}
+@keyframes moa-rummage{0%,100%{transform:translateY(0) rotate(0)}20%,35%{transform:translate(-4px,3px) rotate(-6deg)}60%,75%{transform:translate(4px,-2px) rotate(5deg)}}
+@keyframes moa-scan-eyes{0%,100%{transform:translate(0,0)}20%,35%{transform:translate(-3px,1px)}60%,75%{transform:translate(3px,-2px)}}
+@keyframes moa-page-sort{0%,100%{transform:translate(0,0) rotate(-13deg)}30%,42%{transform:translate(8px,-7px) rotate(7deg)}70%{transform:translate(0,12px) rotate(-8deg)}}
+@keyframes moa-page-sort-back{0%,100%{transform:translate(0,0) rotate(12deg)}32%{transform:translate(0,8px) rotate(5deg)}62%,78%{transform:translate(-8px,-6px) rotate(-8deg)}}
+@keyframes moa-look-around{0%,100%{transform:rotate(0)}25%,38%{transform:rotate(-5deg) translateX(-3px)}65%,78%{transform:rotate(5deg) translateX(3px)}}
+@keyframes moa-note-nod{0%,100%{transform:translateY(0) rotate(0)}30%,45%{transform:translateY(3px) rotate(4deg)}70%{transform:translateY(-2px) rotate(-2deg)}}
+@keyframes moa-write{0%,100%{transform:translate(0,0) rotate(0)}25%{transform:translate(-3px,2px) rotate(-10deg)}50%{transform:translate(0,3px) rotate(4deg)}75%{transform:translate(-2px,1px) rotate(-6deg)}}
+@keyframes moa-compare{0%,100%{transform:rotate(0)}25%,35%{transform:rotate(-4deg) translateX(-2px)}65%,75%{transform:rotate(4deg) translateX(2px)}}
+@keyframes moa-baffled{0%,100%{transform:rotate(0)}16%{transform:rotate(-5deg)}24%{transform:rotate(4deg)}32%{transform:rotate(-3deg)}40%,72%{transform:rotate(2deg) translateY(2px)}}
+@keyframes moa-question-bob{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-4px) rotate(7deg)}}
+@keyframes moa-clock-check{0%,100%{transform:rotate(-12deg)}50%{transform:rotate(15deg)}}
+@keyframes moa-notice{0%,65%,100%{transform:translateY(0)}20%{transform:translateY(-6px) rotate(-3deg)}35%{transform:translateY(1px) rotate(2deg)}}
 @media(prefers-reduced-motion:reduce){.moa *{animation:none!important;transition:none!important}}
 @media(max-width:720px){.scene .guide-intro{margin:0;gap:0}.scene .moa{width:170px;margin:0}}

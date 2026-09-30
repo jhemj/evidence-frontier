@@ -275,7 +275,7 @@ function renderSnapshot() {
   const messageCard = (m) => {
     const text = esc(m.text).replace(/OBSERVATION-[a-f0-9]{12}/g,
       (id) => `<button class="inline-reference" data-ref="${id}" title="${id}">근거 ↗</button>`);
-    return `<article class="message ${esc(m.role)} ${esc(m.mode || "")}"><div class="message-role">${m.role === "user" ? "나" : "Frontier"}${m.partial ? ' <span>부분 근거 답변</span>' : ''}</div>${text}</article>`;
+    return `<article class="message ${esc(m.role)} ${esc(m.mode || "")}"><div class="message-role">${m.role === "user" ? "나" : "forsic"}${m.partial ? ' <span>부분 근거 답변</span>' : ''}</div>${text}</article>`;
   };
   const history = automaticMessages.length
     ? `<details class="investigation-history"><summary>에이전트 작업 기록 ${automaticMessages.length}</summary>${automaticMessages.map(messageCard).join("")}</details>` : "";
@@ -541,7 +541,7 @@ $("save-report").onclick = () =>
   });
 async function download(id, reader = null) {
   const route = reader ? `/reports/${encodeURIComponent(id)}/files/${reader}.docx` : `/reports/${encodeURIComponent(id)}/download`;
-  const filename = reader ? `frontier-${reader}.docx` : 'frontier-restricted-evidence.zip';
+  const filename = reader ? `forsic-${reader}.docx` : 'forsic-restricted-evidence.zip';
   if (!token) {
     const link = document.createElement("a");
     link.href = '/api' + route;

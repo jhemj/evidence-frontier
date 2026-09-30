@@ -1,16 +1,18 @@
 (function(root) {
   'use strict';
-  // Display-only: explicit question/job links, never a new hypothesis or plan.
+  // Display-only: one version-bound briefing, never a new hypothesis or plan.
   const objects=(view,type)=>Object.values(view?.objects||{}).filter(o=>o.type===type);
   const explanationAt=h=>h.explanation_history?.entries.find(r=>r.revision===h.ledger_revision)?.at||h.changed_at||'';
   function linkedTests(h,view) {
     if(!h)return [];
-    const keys=new Set(objects(view,'question').filter(q=>q.hypothesis_keys.includes(h.key)).flatMap(q=>q.test_keys));
-    const sources=new Set((h.source_keys||[]).map(k=>k.slice('observation:'.length)));
-    // A shared question alone can cover many objects. Require an explicit
-    // source input as well; path/name similarity is not a semantic relation.
-    return [...keys].map(k=>view.objects[k]).filter(t=>t&&
-      [...(t.design?.required_observation_ids||[]),...(t.design?.baseline_observation_ids||[])].some(id=>sources.has(id)));
+    const targets=new Set([h.key,...explicitRelations(view,'explains').filter(r=>r.to===h.key).map(r=>r.from)]);
+    return explicitRelations(view,'discriminates').filter(r=>targets.has(r.to)).map(r=>view.objects[r.from])
+      .filter((t,i,all)=>t?.type==='test'&&all.findIndex(x=>x.key===t.key)===i);
+  }
+  function explicitRelations(view,kind){
+    return (view?.relations||[]).filter(r=>r.kind===kind&&r.target_scope&&
+      r.from_ref?.key===r.from&&r.to_ref?.key===r.to&&
+      view.objects[r.from]?.version===r.from_ref.version&&view.objects[r.to]?.version===r.to_ref.version);
   }
   function context({view,current,activity,available,selectedKey,pinned=false,restricted=()=>false}) {
     const ended=!!current.case.execution_end||['complete','completed','quiescent','resource_limit','failed','paused'].includes(current.case.status);
@@ -52,9 +54,35 @@
   }
   function claimFor(h,view) {
     if(!h)return null;
-    const sources=new Set(h.source_keys||[]);
-    return objects(view,'claim').find(c=>c.validity==='adopted'&&c.display_binding?.status==='bound'&&
-      c.source_keys.some(k=>sources.has(k)))||null;
+    return explicitRelations(view,'explains').filter(r=>r.to===h.key).map(r=>view.objects[r.from])
+      .find(c=>c.type==='claim'&&c.validity==='adopted'&&c.display_binding?.status==='bound')||null;
+  }
+  function composeBundle(h,view,{ended=false,historical=false,restricted=()=>false}={}){
+    const c=historical?null:claimFor(h,view);
+    const claim=c&&!restricted(c)?c:null;
+    const test=historical?null:linkedTests(h,view).filter(t=>!restricted(t)).sort((a,b)=>
+      ({running:0,queued:1,blocked:2,candidate:3}[a.execution]??4)-({running:0,queued:1,blocked:2,candidate:3}[b.execution]??4))[0];
+    const plan=testExplanation(test,{ended});
+    const relation=claim&&explicitRelations(view,'explains').find(r=>r.from===claim.key&&r.to===h.key);
+    return {hypothesis:h,claim,test,plan,historical,
+      snapshot:view.envelope.projection_revision,
+      refs:[h,claim,test].filter(Boolean).map(o=>({key:o.key,version:o.version})),
+      fact:claim?factText(claim):null,
+      reason:relation?.rationale||h.ranking_reason||h.historical_reason||h.reason||null,
+      limitation:!h.assessment_current?'이 설명은 이전 판단이에요. 새 근거를 반영한 판단은 아직 확인되지 않았어요.':
+        h.gaps?.[0]||h.counterarguments?.find(Boolean)||null,
+      linkageGap:!claim?'이 가설을 뒷받침하는 단서와의 연결은 아직 기록되지 않았어요.':null,
+      next:test?plan.purpose:h.next_discriminator||h.historical_next_discriminator||null,
+      nextStatus:test?plan.status:'다음 검사 후보 · 실행 계획과는 별개',
+      nextGap:!test?'이 가설을 판별할 실제 검사와의 연결은 아직 없어요.':null};
+  }
+  function timelineBundle(t,view){
+    const r=t.representative_claim_ref,c=r&&view.objects[r.key];
+    const valid=c&&c.version===r.version&&c.type==='claim'&&c.validity==='adopted'&&
+      c.display_binding?.status==='bound'&&t.claim_refs.some(x=>x.key===r.key&&x.version===r.version);
+    return {claim:valid?c:null,target:valid?c.key:t.source_ref.key,
+      text:valid?factText(c):t.title||'원문 시각 · 해석은 상세에서 확인',
+      reason:valid?t.relevance_reason:null};
   }
   function factText(c) {
     const fact=c?.display_binding?.status==='bound'&&c.display_binding.fact;
@@ -115,7 +143,7 @@
     }
     loaded(record=this.selected){return record&&this.cache.get(record.token);}
   }
-  const api={linkedTests,context,testExplanation,claimFor,factText,ExplanationHistory};
+  const api={linkedTests,explicitRelations,context,testExplanation,claimFor,composeBundle,timelineBundle,factText,ExplanationHistory};
   if(typeof module!=='undefined')module.exports=api;
   else root.ObserverBriefing=api;
 })(typeof window!=='undefined'?window:globalThis);

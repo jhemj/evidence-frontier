@@ -6,12 +6,71 @@ Object revisions identify content, not confidence or event ordering.
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 
 from .evidence_semantics import exact_utc_ns, observation_time
 from .temporal import file_anchors
-from .observer_activity import model_context, failure_details
+from .observer_activity import model_context, failure_details, resolve_review_failures, tool_result_summary
 
 VERSION = 'observer-view-1'
+PURPOSE_REF_LIMIT = 32
+RESULT_REF_LIMIT = 32
+_PURPOSE_OBSERVATION = re.compile(
+    r'(?<![A-Za-z0-9_/:.\-])OBSERVATION-[a-f0-9]{12}(?![A-Za-z0-9_/\-])')
+
+
+def purpose_observation_ids(reason):
+    """Bounded literal stable IDs, never URLs, paths or executable commands."""
+    if not isinstance(reason, str):
+        return [], False
+    ids, seen = [], set()
+    for segment in re.finditer(r'\S+', reason):
+        token = segment.group()
+        if '://' in token or token.startswith(('file:', 'data:', 'javascript:')):
+            continue
+        for match in _PURPOSE_OBSERVATION.finditer(token):
+            identity = match.group()
+            if identity in seen:
+                continue
+            if len(ids) == PURPOSE_REF_LIMIT:
+                return ids, True
+            ids.append(identity)
+            seen.add(identity)
+    return ids, False
+
+
+def purpose_job_current(job, *, case_id, tasks, active_evidence):
+    """A purpose link has the actual job's current task/evidence scope."""
+    task = tasks.get(job.get('task_id'))
+    generation = job.get('generation', 0)
+    return bool(job.get('case_id') == case_id and task
+        and task.get('case_id') == case_id and not task.get('superseded')
+        and job.get('evidence_id') in active_evidence
+        and task.get('evidence_id') == job.get('evidence_id')
+        and type(generation) is int
+        and generation == task.get('retry_generation', 0))
+
+
+def purpose_source_current(source, *, case_id, evidence_id, tasks, active_evidence):
+    """Raw canonical sources need not have an investigation-task generation.
+
+    If an observation DOES declare a task, validate that task's own generation;
+    never equate an ingestion task to the job that now references its source.
+    """
+    if (source.get('kind') != 'observation' or source.get('case_id') != case_id
+            or source.get('evidence_id') != evidence_id or evidence_id not in active_evidence
+            or source.get('superseded')):
+        return False
+    task_id = source.get('task_id')
+    generation = source.get('generation', 0)
+    if type(generation) is not int:
+        return False
+    if not task_id:
+        return generation == 0
+    task = tasks.get(task_id)
+    return bool(task and task.get('case_id') == case_id and not task.get('superseded')
+        and task.get('evidence_id') == evidence_id
+        and generation == task.get('retry_generation', 0))
 
 
 def digest(value):
@@ -126,6 +185,8 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
         f = row.get('fields', {})
         excerpt=f.get('excerpt')
         add('observation', row['id'], {'title': f.get('path') or row.get('type') or '원문 관측',
+            'evidence_id': row.get('evidence_id'),
+            'reference_only': bool(row.get('_purpose_reference_only')),
             'source_type': row.get('type'), 'source_location': row.get('source_location'),
             'excerpt': excerpt[:12000] if isinstance(excerpt,str) else excerpt,
             'excerpt_characters': row.get('_excerpt_characters',len(excerpt) if isinstance(excerpt,str) else None),
@@ -328,7 +389,10 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
 
     receipts = by_kind.get('receipt', [])
     by_reservation = {r.get('reservation_id'): r for r in receipts if r.get('reservation_id')}
-    by_input = {r.get('input_record_id'): r for r in receipts if r.get('input_record_id')}
+    by_input = {}
+    for receipt in receipts:
+        if receipt.get('input_record_id'):
+            by_input.setdefault(receipt['input_record_id'], []).append(receipt)
     activities = []
     dossier_records = {d['id']: d for d in by_kind.get('dossier', []) if scoped(d)}
     for j in jobs:
@@ -339,44 +403,87 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
         target=(request.get('query') or request.get('path')) if request.get('tool')=='search' else (request.get('path') or request.get('query'))
         activities.append({'id': j['id'], 'kind': 'tool', 'title': (j.get('request') or {}).get('tool') or '도구',
             'purpose':(j.get('request') or {}).get('reason'),
+            'purpose_refs': [], 'purpose_missing_refs': [],
+            'purpose_ref_limit': PURPOSE_REF_LIMIT,
             'state': state, 'target': target or '범위는 검사 상세 참조',
             'at': j.get('ended_at') or j.get('dispatched_at') or j.get('created_at'), 'error': j.get('error'),
+            'completed_at': j.get('ended_at') if terminal or state == 'failed' else None,
+            'result_summary': tool_result_summary(j),
+            'result_refs': [], 'result_missing_refs': [], 'result_ref_limit': RESULT_REF_LIMIT,
             'timer_at':start if state in ('running','waiting') else None,
             'timer_origin':'execution' if j.get('started_at') else 'dispatch' if start else None,
             'failure':failure_details(j) if state=='failed' else None,
-            'task_id': j.get('task_id'), 'result_adopted': j.get('status') == 'ingested'})
+            'task_id': j.get('task_id'), 'evidence_id': j.get('evidence_id'),
+            'generation': j.get('generation', 0), 'result_adopted': j.get('status') == 'ingested'})
     for r in by_kind.get('model_reservation', []) + by_kind.get('review_input', []) + by_kind.get('synthesis_input', []):
         if not scoped(r):
             continue
-        receipt = by_reservation.get(r['id']) or by_input.get(r['id'])
+        candidates = [candidate for candidate in by_input.get(r['id'], [])
+            if candidate.get('task_id') == r.get('task_id')
+            and candidate.get('generation', 0) == r.get('generation', 0)
+            and all(r.get(k) is None or candidate.get(k) is None or r[k] == candidate[k]
+                    for k in ('batch_id', 'round', 'attempt', 'input_sha256'))]
+        # Independent partial adoption from the SAME rejected response must
+        # not silently replace its error receipt or clear the failed scope.
+        receipt = by_reservation.get(r['id']) or next((candidate for candidate in reversed(candidates)
+            if candidate.get('error') or candidate.get('receipt_type') == 'dossier_model_error'),
+            candidates[-1] if candidates else None)
         if receipt and (receipt.get('task_id') != r.get('task_id') or
                         receipt.get('generation', 0) != r.get('generation', 0)):
             receipt = None
         error = (receipt or {}).get('error') or r.get('error')
         received = bool(receipt) or r.get('status') == 'received'
-        # Saved input is not dispatch evidence. Only an explicit request-start
-        # record can describe a model as currently executing.
+        # A HTTP/adapter request start is not observed GPU generation.
         started = r.get('request_started_at')
-        model_state = 'failed' if error or r.get('status') == 'failed' else 'received' if received else 'running' if started else 'input_registered'
+        model_state = 'failed' if error or r.get('status') == 'failed' else 'received' if received else 'waiting' if started else 'input_registered'
         failure = failure_details(r, receipt) if model_state == 'failed' else None
         activities.append({'id': r['id'], 'kind': 'model',
-            'title': failure['title'] if failure else '모델 응답 수신 · 채택과 별개' if received else 'AI 검토 진행 중' if started else '검토 입력 준비됨 · 실행 상태 미제공',
+            'title': failure['title'] if failure else '모델 응답 수신 · 채택과 별개' if received else '검토 요청 후 응답 대기 · 생성 상태 미제공' if started else '검토 입력 준비됨 · 실행 상태 미제공',
             'state': model_state,
             'target': r.get('activity_target') or r.get('purpose') or '구조화 판단',
             'context':model_context(r, dossier_records), 'failure':failure,
+            'failure_impact': 'unresolved' if failure else None,
             'at': (receipt or {}).get('created_at') or r.get('created_at'), 'error': error,
-            'timer_at':started if model_state=='running' else r.get('created_at') if model_state=='input_registered' else None,
-            'timer_origin':'execution' if model_state=='running' else 'input_registered' if model_state=='input_registered' else None,
+            'completed_at': (receipt or {}).get('created_at') if receipt else None,
+            'timer_at':started if model_state=='waiting' else r.get('created_at') if model_state=='input_registered' else None,
+            'timer_origin':'dispatch' if model_state=='waiting' else 'input_registered' if model_state=='input_registered' else None,
             'task_id': r.get('task_id'), 'result_adopted': None})
+    from .observer_activity import lifecycle_activities
+    lifecycle = lifecycle_activities(by_kind.get('request_lifecycle', []),
+        by_kind.get('review_input', []) + by_kind.get('synthesis_input', []) + by_kind.get('falsifier_input', []),
+        dossier_records, scoped, digest)
+    covered_inputs = {a['input_record_id'] for a in lifecycle if a.get('input_record_id')}
+    covered_reservations = {a['reservation_id'] for a in lifecycle if a.get('reservation_id')}
+    activities = [a for a in activities if a['id'] not in covered_inputs | covered_reservations] + lifecycle
+    # Do not resolve a legacy warning through title/owner overlap or a later
+    # round's success. Explicit saved diagnostic feedback plus all same-scope
+    # assessment receipts is the only available frozen-run recovery proof.
+    resolve_review_failures([a for a in activities if a['id'] not in {x['id'] for x in lifecycle}],
+        by_kind.get('review_input', []), receipts, by_kind.get('review_diagnostic', []),
+        dossier_records, tasks, case_id, digest)
     for t in tasks.values():
-        if t.get('status') == 'running' and not any(a['task_id'] == t['id'] and a['state'] in ('running', 'waiting') for a in activities):
+        if any(a['task_id'] == t['id'] and a['state'] in ('running', 'waiting', 'validating', 'adopting') for a in activities):
+            continue
+        if t.get('status') == 'queued' and t.get('worker_job_key'):
+            # Controller reserves a durable key BEFORE POST. This proves an
+            # outstanding worker request, not dispatch success or GPU/tool
+            # execution. Older frozen runs do not retain worker-status events.
+            activities.append({'id': t['id'], 'kind': 'task', 'title': t.get('action') or '조사 단계',
+                'state': 'waiting', 'phase': 'worker_status_unobserved',
+                'target': t.get('label') or t.get('action') or '자료 확인',
+                'at': t.get('started_at') or t.get('created_at'),
+                'timer_at': t.get('started_at'), 'timer_origin': 'stage',
+                'error': t.get('error'), 'task_id': t['id'], 'result_adopted': None})
+        elif t.get('status') == 'running':
             activities.append({'id': t['id'], 'kind': 'task', 'title': t.get('action') or '조사 단계',
                 'state': 'running', 'target': '단계 실행 중 · 세부 실행 상태 미제공',
                 'at': t.get('started_at') or t.get('created_at'), 'error': t.get('error'), 'task_id': t['id'], 'result_adopted': None})
     if case.get('status') not in ('running', 'pause_requested'):
         for a in activities:
-            if a['state'] in ('running', 'waiting', 'input_registered'):
+            if a['state'] in ('running', 'waiting', 'input_registered', 'validating', 'adopting'):
                 a['state'] = 'interrupted'
+            elif a['state'] == 'queued':
+                a['state'] = 'paused_pending'
     activities.sort(key=lambda a: (a.get('at') or '', a['id']), reverse=True)
 
     relations = []
@@ -411,8 +518,93 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
         keys = e.get('source_keys', []) + e.get('claim_keys', []) + e.get('hypothesis_keys', []) + e.get('test_keys', [])
         e['refs'] = [{'key': key, 'version': entities[key]['version']} for key in dict.fromkeys(keys)]
         e['version'] = digest({k: v for k, v in e.items() if k != 'version'})
+    # Purpose links are display navigation only. Resolve AFTER canonical object
+    # versions are finalized; do not add citation/support/semantic relations.
+    current_jobs = {j['id']: j for j in jobs}
+    for activity in activities:
+        if activity['kind'] != 'tool':
+            continue
+        ids, truncated = purpose_observation_ids(activity.get('purpose'))
+        activity['purpose_refs_truncated'] = truncated
+        job = current_jobs[activity['id']]
+        allowed = purpose_job_current(job, case_id=case_id, tasks=tasks, active_evidence=active)
+        for identity in ids:
+            source = source_rows.get(identity, {})
+            key = 'observation:' + identity
+            obj = entities.get(key)
+            if (allowed and obj and purpose_source_current(source, case_id=case_id,
+                    evidence_id=job.get('evidence_id'), tasks=tasks, active_evidence=active)):
+                activity['purpose_refs'].append({'id': identity, 'key': key,
+                    'version': obj['version'], 'source_version': obj['source_version']})
+            else:
+                activity['purpose_missing_refs'].append(identity)
+        # Retained returned observations are result navigation, not semantic
+        # support or new independent evidence. Keep these refs separate from
+        # observations merely named in the request purpose.
+        recorded = job.get('observation_ids')
+        result_ids = list(dict.fromkeys(i for i in recorded if isinstance(i, str) and i)) if isinstance(recorded, list) else []
+        activity['result_summary']['recorded_reference_count'] = len(result_ids) if isinstance(recorded, list) and job.get('status') == 'ingested' else None
+        activity['result_refs_truncated'] = len(result_ids) > RESULT_REF_LIMIT
+        result_allowed = allowed and job.get('status') == 'ingested'
+        for identity in result_ids[:RESULT_REF_LIMIT]:
+            source = source_rows.get(identity, {})
+            key = 'observation:' + identity
+            obj = entities.get(key)
+            if (result_allowed and obj and purpose_source_current(source, case_id=case_id,
+                    evidence_id=job.get('evidence_id'), tasks=tasks, active_evidence=active)):
+                activity['result_refs'].append({'id': identity, 'key': key,
+                    'version': obj['version'], 'source_version': obj['source_version']})
+            else:
+                activity['result_missing_refs'].append(identity)
+    # Semantic relations are explicit, revision-bound records. Merely sharing
+    # a question, source or dossier never establishes this connection.
+    for intent in by_kind.get('test_intent', []):
+        scope = intent.get('scope') or {}
+        ref = scope.get('semantic_target_ref') or {}
+        target = scope.get('semantic_target_scope') or {}
+        t = entities.get('test:' + intent['id'])
+        c = entities.get('claim:' + str(ref.get('id')))
+        if (not t or not c or not scoped(intent) or ref.get('kind') != 'claim'
+                or c.get('canonical_version') != ref.get('version') or c.get('validity') != 'adopted'
+                or c.get('display_binding', {}).get('status') != 'bound'
+                or c.get('task_id') != scope.get('task_id') or c.get('evidence_id') != scope.get('evidence_id')
+                or not target.get('observation_ids') or not set(target['observation_ids']) <= set(c.get('source_ids', []) + c.get('counter_ids', []))
+                or any(target.get(k) != scope.get(k) for k in ('task_id', 'evidence_id'))
+                or target.get('generation') != scope.get('generation', 0)):
+            continue
+        relations.append({'id': intent['id'] + ':discriminates', 'from': t['key'], 'to': c['key'],
+            'kind': 'discriminates', 'from_ref': {'key': t['key'], 'version': t['version']},
+            'to_ref': {'key': c['key'], 'version': c['version']}, 'target_scope': target,
+            'basis': 'explicit-canonical-target-1'})
+    hypothesis_rows = {r['id']: r for r in by_kind.get('hypothesis', [])}
+    for link in by_kind.get('explanation_relation', []):
+        h = entities.get('hypothesis:' + str(link.get('hypothesis_id')))
+        original = hypothesis_rows.get(link.get('hypothesis_id'), {})
+        ref = link.get('claim_ref') or {}
+        c = entities.get('claim:' + str(ref.get('id')))
+        scope = link.get('target_scope') or {}
+        if (link.get('contract') != 'explicit-explains-1' or link.get('relation') != 'explains'
+                or not scoped(link) or not h or not c or not h.get('assessment_current')
+                or link.get('hypothesis_revision') != h.get('ledger_revision')
+                or original.get('task_id') != link.get('task_id')
+                or original.get('generation', 0) != link.get('generation', 0)
+                or original.get('evidence_id') != link.get('evidence_id')
+                or ref.get('kind') != 'claim' or c.get('canonical_version') != ref.get('version')
+                or c.get('validity') != 'adopted' or c.get('display_binding', {}).get('status') != 'bound'
+                or c.get('task_id') != link.get('task_id') or c.get('evidence_id') != link.get('evidence_id')
+                or not scope.get('observation_ids') or not set(scope['observation_ids']) <= set(c.get('source_ids', []) + c.get('counter_ids', []))
+                or scope.get('task_id') != link.get('task_id')
+                or scope.get('evidence_id') != link.get('evidence_id')
+                or scope.get('generation') != link.get('generation', 0)):
+            continue
+        relations.append({'id': link['id'], 'from': c['key'], 'to': h['key'], 'kind': 'explains',
+            'from_ref': {'key': c['key'], 'version': c['version']},
+            'to_ref': {'key': h['key'], 'version': h['version']},
+            'target_scope': scope, 'rationale': link.get('rationale'), 'basis': 'explicit-explains-1'})
     times = []
     for observation in observations:
+        if observation.get('_purpose_reference_only'):
+            continue  # A navigation reference is not a new incident-time claim.
         for t in time_assertions(observation):
             key = 'observation:' + observation['id']
             related=[e for e in entities.values() if e['type']=='claim' and key in e.get('source_keys',[]) and e['validity']=='adopted']
@@ -421,6 +613,7 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             times.append({**t,'core':bool(core), 'title':representative['title'] if representative else '원문 시각 · 해석은 상세에서 확인',
                           'explanation':representative['statement'] if representative else entities[key]['limitation'],
                           'relevance_reason':(representative or {}).get('relevance',{}).get('reason') or (representative or {}).get('reason'),
+                          'representative_claim_ref': {'key': representative['key'], 'version': representative['version']} if representative else None,
                           'source_ref': {'key': key, 'version': entities[key]['version']},
                           'claim_refs': [{'key': e['key'], 'version': e['version']} for e in entities.values()
                                          if e['type'] == 'claim' and key in e.get('source_keys', [])]})
@@ -460,6 +653,23 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             'activity': {'checked_at': captured_at, 'items': activities, 'eta': None,
                          'eta_reason': '원장에 비교 가능한 작업량·소요시간 기준이 제공되지 않아 산정할 수 없습니다.'},
             'reports': reports,
+            'jev_annotations': [
+                {'id':a['id'],'subject_id':a['subject_id'],'label':a['label'],
+                 'category':a['category'],'at':a.get('response_received_at'),
+                 'probabilities':None,'advisory_only':True,'policy_applied':False,
+                 'basis':'Jev 시험용 단서 분류 · 판정이나 침해 확률이 아님'}
+                for a in by_kind.get('jev_annotation',[])
+                if a.get('status')=='annotated' and a.get('epoch_id')==case.get('epoch_id')
+                and a.get('source_binding')==case.get('runtime_binding',{}).get('fingerprint')
+                and any(e['id']==a.get('material',{}).get('evidence_id') and e['id'] in active
+                    and (e.get('_source_version') or digest({k:v for k,v in e.items() if not k.startswith('_')}))==a.get('evidence_version')
+                    for e in by_kind.get('evidence',[]))
+                and a.get('subject_id') in {d['id'] for d in by_kind.get('dossier',[]) if scoped(d)}
+                and digest({k:next(d for d in by_kind['dossier'] if d['id']==a['subject_id']).get(k)
+                    for k in a.get('material',{})})==a.get('subject_digest')
+                and all(r.get('id') in source_rows and (source_rows[r['id']].get('_source_version') or
+                    digest({k:v for k,v in source_rows[r['id']].items() if not k.startswith('_')}))==r.get('version') for r in a.get('refs',[]))
+            ],
             'report_finalizations':[{k:r.get(k) for k in ('id','status','reason','source_revision','report_record_id','error','ended_at')}
                                     for r in by_kind.get('report_finalization',[])],
             'summary': {'intrusion':{'verdict':leading['verdict'] if leading else 'undetermined',
@@ -504,8 +714,59 @@ def validate(view):
         for ref in narrative['refs']:
             if objects.get(ref['key'], {}).get('version') != ref['version']:
                 raise ValueError('Incompatible narrative reference')
+    for activity in view.get('activity', {}).get('items', []):
+        if activity.get('kind') != 'tool' or 'purpose_refs' not in activity:
+            continue
+        ids, truncated = purpose_observation_ids(activity.get('purpose'))
+        refs = activity['purpose_refs']
+        missing = activity.get('purpose_missing_refs', [])
+        if (activity.get('purpose_ref_limit') != PURPOSE_REF_LIMIT
+                or activity.get('purpose_refs_truncated') is not truncated
+                or len({r.get('id') for r in refs}) != len(refs)
+                or len(set(missing)) != len(missing)
+                or set(missing) & {r.get('id') for r in refs}
+                or set(ids) != set(missing) | {r.get('id') for r in refs}):
+            raise ValueError('Invalid purpose reference inventory')
+        for ref in refs:
+            obj = objects.get(ref.get('key'), {})
+            if (ref.get('key') != 'observation:' + str(ref.get('id'))
+                    or obj.get('type') != 'observation' or obj.get('id') != ref.get('id')
+                    or obj.get('version') != ref.get('version')
+                    or obj.get('source_version') != ref.get('source_version')
+                    or obj.get('evidence_id') != activity.get('evidence_id')):
+                raise ValueError('Incompatible purpose source reference')
+        result_refs = activity.get('result_refs', [])
+        result_missing = activity.get('result_missing_refs', [])
+        if (activity.get('result_ref_limit') != RESULT_REF_LIMIT
+                or type(activity.get('result_refs_truncated')) is not bool
+                or len(result_refs) + len(result_missing) > RESULT_REF_LIMIT
+                or len({r.get('id') for r in result_refs}) != len(result_refs)
+                or len(set(result_missing)) != len(result_missing)
+                or set(result_missing) & {r.get('id') for r in result_refs}):
+            raise ValueError('Invalid tool result reference inventory')
+        for ref in result_refs:
+            obj = objects.get(ref.get('key'), {})
+            if (ref.get('key') != 'observation:' + str(ref.get('id'))
+                    or obj.get('type') != 'observation' or obj.get('id') != ref.get('id')
+                    or obj.get('version') != ref.get('version')
+                    or obj.get('source_version') != ref.get('source_version')
+                    or obj.get('evidence_id') != activity.get('evidence_id')
+                    or activity.get('result_adopted') is not True):
+                raise ValueError('Incompatible tool result reference')
+    for relation in view.get('relations', []):
+        if relation.get('kind') not in ('explains', 'discriminates'):
+            continue
+        for end in ('from', 'to'):
+            ref = relation.get(end + '_ref') or {}
+            if ref.get('key') != relation.get(end) or objects.get(ref.get('key'), {}).get('version') != ref.get('version'):
+                raise ValueError('Incompatible explanation reference')
     for time in view['timeline']:
         for ref in [time['source_ref']] + time['claim_refs']:
             if objects.get(ref['key'], {}).get('version') != ref['version']:
                 raise ValueError('Incompatible time reference')
+        representative = time.get('representative_claim_ref')
+        if representative and (representative not in time['claim_refs'] or
+                objects.get(representative['key'], {}).get('validity') != 'adopted' or
+                objects[representative['key']].get('display_binding', {}).get('status') != 'bound'):
+            raise ValueError('Invalid representative time claim')
     return view

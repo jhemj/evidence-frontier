@@ -54,6 +54,8 @@ class ProviderConfig(ModelConnection):
     review_concurrency: int = Field(default=1, ge=1, le=2, strict=True)
     second_review_policy: Literal['always','conditional-v1'] = 'always'
     review_queue_policy: Literal['question-priority-v1','returned-first-v1'] = 'question-priority-v1'
+    test_contract_policy: Literal['legacy','purpose-outcomes-v2'] = 'legacy'
+    recovery_policy: Literal['disabled','bounded-v1'] = 'disabled'
     investigator: Literal['native'] = 'native'
     investigation_strategy: Literal['guided','baseline'] = 'guided'
     secondary: ModelConnection | None = None
@@ -157,6 +159,118 @@ class TestDesign(Strict):
         description='What this immediate result changes in the question or next feasible test. Discovery may locate evidence without deciding the final hypothesis.')
     reopen_on: str = Field(default='',max_length=400,
         description='Changed evidence/object/resolution context needed to justify repeating a failed or already assessed test. Rephrasing the same condition is not progress.')
+    discrimination_target: 'ExplanationDiscriminator | None' = Field(default=None,
+        description='Optional exact adopted proposition this test discriminates. Copy claim_ref and target_scope exactly from accepted_claim_refs supplied in this input. Omit when not supplied. A dossier owner, shared question or shared source is not this semantic link; this field grants no additional execution or judgment authority.')
+
+
+class TestObjectRef(Strict):
+    kind: Literal['dossier','hypothesis','claim','case_question','observation','evidence']
+    id: str = Field(min_length=1,max_length=180)
+    version: str = Field(pattern=r'^[a-f0-9]{64}$',description='Copy the Controller-offered record version exactly; no latest-version substitution.')
+
+
+class TestTargetScope(Strict):
+    case_id: str = Field(min_length=1,max_length=180)
+    task_id: str = Field(min_length=1,max_length=180)
+    evidence_id: str = Field(min_length=1,max_length=180)
+    generation: int = Field(ge=0,strict=True)
+    source_run: str = Field(min_length=1,max_length=180)
+
+
+class RequiredTestInput(Strict):
+    ref: TestObjectRef
+    role: Literal['subject','context','baseline','counterevidence','reliability']
+    required_view: Literal['metadata','body_excerpt','full_body']
+    trust_basis: Literal['unassessed','retained_source','independent_baseline']
+    scope: TestTargetScope
+
+
+TEST_OUTCOME_UNSUPPORTED = 'unsupported_by_this_test'
+TEST_PURPOSE_OUTCOMES = {
+    'discover': frozenset(('found','no_match_in_scope','partial','unavailable')),
+    'discriminate': frozenset(('supports','refutes','inconclusive')),
+    'verify_reliability': frozenset(('supports','refutes','inconclusive')),
+}
+
+
+class TestOutcomeRules(Strict):
+    """All 7 rules required. Unused rules = exact unsupported_by_this_test.
+    allowed_outcomes = all non-sentinel keys.
+    """
+    supports: str = Field(min_length=1,max_length=500)
+    refutes: str = Field(min_length=1,max_length=500)
+    inconclusive: str = Field(min_length=1,max_length=500,
+        description='Discover: exact unsupported_by_this_test; otherwise a scoped non-decisive condition.')
+    found: str = Field(min_length=1,max_length=500)
+    no_match_in_scope: str = Field(min_length=1,max_length=500)
+    partial: str = Field(min_length=1,max_length=500)
+    unavailable: str = Field(min_length=1,max_length=500)
+
+
+class TestResultLineage(Strict):
+    parent_contract_id: str = Field(pattern=r'^[a-f0-9]{64}$')
+    result_revision: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class TestDesignV2(Strict):
+    """Purpose/outcome crossing uses the system protocol, validated after JSON schema."""
+    version: Literal[2] = 2
+    purpose: Literal['discover','discriminate','verify_reliability']
+    immediate_observable: TestDesign.model_fields['immediate_observable'].annotation
+    owner_ref: TestObjectRef
+    question_ref: TestObjectRef = Field(description='Copy offered case_question ref/version; never an owner ref.')
+    target_ref: TestObjectRef | None
+    target_scope: TestTargetScope
+    target_proposition: str = Field(max_length=2000)
+    required_inputs: list[RequiredTestInput] = Field(max_length=12)
+    baseline_ref: TestObjectRef | None
+    required_result_view: Literal['metadata','body_excerpt','full_body']
+    outcome_rules: TestOutcomeRules
+    allowed_outcomes: list[Literal['supports','refutes','inconclusive','found','no_match_in_scope','partial','unavailable']] = Field(min_length=1,max_length=7,
+        description='Exactly the unique rule keys whose values are not unsupported_by_this_test.')
+    design_timing: Literal['before_result','after_result']
+    uses_existing_result: bool
+    lineage: TestResultLineage | None
+    expected_update: str = Field(min_length=1,max_length=500)
+    reopen_on: str = Field(max_length=400)
+
+    @model_validator(mode='after')
+    def purpose_contract(self):
+        unsupported=TEST_OUTCOME_UNSUPPORTED
+        allowed=set(self.allowed_outcomes)
+        if len(allowed)!=len(self.allowed_outcomes):raise ValueError('Duplicate allowed outcome')
+        rules=self.outcome_rules.model_dump()
+        supported={k for k,v in rules.items() if v!=unsupported}
+        permitted=TEST_PURPOSE_OUTCOMES[self.purpose]
+        if allowed!=supported:
+            raise ValueError('allowed_outcomes must exactly match supported outcome rules: '
+                f'non-sentinel keys={sorted(supported)}, allowed_outcomes={sorted(allowed)}; '
+                f'unsupported rules must equal {unsupported!r} exactly; '
+                f'purpose={self.purpose!r} permits only {sorted(permitted)}. '
+                'Reassess the actual purpose and conditions; do not relabel a collection result as hypothesis support.')
+        if self.purpose=='discover':
+            if allowed-permitted:
+                raise ValueError('Discovery collects observations, not hypothesis support/refutation: '
+                    f'supports/refutes/inconclusive rules must be exactly {unsupported!r}; '
+                    f'allowed outcomes are a supported subset of {sorted(permitted)}.')
+            if self.target_ref is not None:raise ValueError('Discovery does not discriminate a target proposition')
+        else:
+            if not self.target_proposition.strip() or self.target_ref is None:
+                raise ValueError('Discrimination/reliability requires an exact target and proposition')
+            if allowed-permitted or not allowed&{'supports','refutes'}:
+                raise ValueError('At least one discriminating side must be supported: '
+                    f'permit only {sorted(permitted)} with a meaningful supports or refutes rule; '
+                    f'found/no_match_in_scope/partial/unavailable must be exactly {unsupported!r}.')
+        if self.question_ref.kind!='case_question':raise ValueError('question_ref must reference a question')
+        baselines=[r.ref for r in self.required_inputs if r.role=='baseline']
+        if (self.baseline_ref is None and baselines) or (self.baseline_ref is not None and self.baseline_ref not in baselines):
+            raise ValueError('baseline_ref must explicitly select a required baseline or be null')
+        if self.design_timing=='after_result':
+            if not self.uses_existing_result or self.lineage is None:
+                raise ValueError('After-result design requires explicit existing-result lineage')
+        elif self.uses_existing_result or self.lineage is not None:
+            raise ValueError('Before-result design cannot claim result reuse')
+        return self
 
 
 class JudgmentCheck(RetrievalScope):
@@ -310,6 +424,38 @@ class WorkingSynthesis(WorkingReview):
     refuting_evidence_ids: list[str] = Field(default_factory=list,max_length=8)
 
 
+class JudgmentCheckV2(JudgmentCheck):
+    test_design: TestDesignV2
+
+
+class CheckAssessmentV2(CheckAssessment):
+    outcome: Literal['supports','refutes','inconclusive','found','no_match_in_scope','partial','unavailable']
+
+
+class WorkingCheckAssessmentV2(WorkingCheckAssessment):
+    outcome: CheckAssessmentV2.model_fields['outcome'].annotation
+
+
+class JudgmentReportV2(JudgmentReport):
+    next_checks: list[JudgmentCheckV2] = Field(default_factory=list,max_length=4)
+    check_assessments: list[CheckAssessmentV2] = Field(default_factory=list,max_length=12)
+
+
+class SynthesisReportV2(SynthesisReport):
+    next_checks: list[JudgmentCheckV2] = Field(default_factory=list,max_length=4)
+    check_assessments: list[CheckAssessmentV2] = Field(default_factory=list,max_length=12)
+
+
+class WorkingReviewV2(WorkingReview):
+    next_checks: list[JudgmentCheckV2] = Field(default_factory=list,max_length=4)
+    check_assessments: list[WorkingCheckAssessmentV2] = Field(default_factory=list,max_length=12)
+
+
+class WorkingSynthesisV2(WorkingSynthesis):
+    next_checks: list[JudgmentCheckV2] = Field(default_factory=list,max_length=4)
+    check_assessments: list[WorkingCheckAssessmentV2] = Field(default_factory=list,max_length=12)
+
+
 def generation_schema(model, *, final_review=False):
     """Require explicit decisions, without changing legacy storage defaults.
 
@@ -343,6 +489,9 @@ def review_output_schema(role,pack):
     if role=='synthesis':schema=WorkingSynthesis if intermediate else SynthesisReport
     elif role=='judgment':schema=WorkingReview if intermediate else JudgmentReport
     else:raise ValueError('Not a review role')
+    if pack.get('test_contract_policy')=='purpose-outcomes-v2':
+        schema={WorkingReview:WorkingReviewV2,JudgmentReport:JudgmentReportV2,
+                WorkingSynthesis:WorkingSynthesisV2,SynthesisReport:SynthesisReportV2}[schema]
     count=len(pack.get('required_dossiers',[]))
     excerpts=None
     if 'observations' in pack:
@@ -400,6 +549,10 @@ class PlannedTool(InvestigationTool):
     test_design: TestDesign = Field(default_factory=TestDesign)
 
 
+class PlannedToolV2(PlannedTool):
+    test_design: TestDesignV2
+
+
 class ScenarioAssessment(Strict):
     comparison_question: str = Field(min_length=3, max_length=240, description='Same question for mutually competing explanations. Reuse a supplied comparison question exactly. Coexisting causal stages belong to different questions.')
     evidence_fit: Literal['limited','moderate','strong']
@@ -408,6 +561,31 @@ class ScenarioAssessment(Strict):
     next_check: str = Field(min_length=3, max_length=700, description='Discriminating next check, or explicitly why sources cannot distinguish explanations.')
     investigation_priority: Literal['high','normal','low']
     priority_reason: str = Field(min_length=3, max_length=700, description='Expected uncertainty reduction, impact and available test cost, independent of evidence-fit rank. No tool authority is granted.')
+
+
+class ExplanationClaimRef(Strict):
+    kind: Literal['claim'] = 'claim'
+    id: str = Field(min_length=1, max_length=180)
+    version: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class ExplanationTargetScope(Strict):
+    task_id: str = Field(min_length=1, max_length=120)
+    evidence_id: str = Field(min_length=1, max_length=120)
+    generation: int = Field(ge=0, strict=True)
+    observation_ids: list[str] = Field(min_length=1, max_length=24)
+    proposition: str = Field(min_length=1, max_length=2000)
+
+
+class ExplanationDiscriminator(Strict):
+    claim_ref: ExplanationClaimRef
+    target_scope: ExplanationTargetScope
+
+
+class ExplanationLinkProposal(ExplanationDiscriminator):
+    relation: Literal['explains'] = 'explains'
+    rationale: str = Field(min_length=1, max_length=700,
+        description='Why this exact adopted proposition explains this hypothesis within its copied target scope. Shared source IDs alone are not an explanation relationship.')
 
 
 class HypothesisAssessment(Strict):
@@ -425,6 +603,8 @@ class HypothesisAssessment(Strict):
     refuting_evidence_ids: list[str] = Field(default_factory=list, max_length=10)
     remaining_checks: list[str] = Field(default_factory=list, max_length=6)
     scenario_assessment: ScenarioAssessment | None = None
+    explanation_links: list[ExplanationLinkProposal] = Field(default_factory=list, max_length=4,
+        description='Optional explicit explanation links. Copy claim_ref and target_scope exactly from accepted_claim_refs in this input, then state how the proposition explains this hypothesis. [] is valid when no accepted claim is supplied; never infer a relationship merely from shared source IDs or invent a claim/version/scope. This grants no test execution or judgment authority.')
 
 
 class InvestigationPlan(Strict):
@@ -434,6 +614,10 @@ class InvestigationPlan(Strict):
     remaining_questions: list[str] = Field(default_factory=list, max_length=10)
     hypotheses: list[HypothesisAssessment] = Field(default_factory=list, max_length=3)
     question_updates: list['QuestionUpdate'] = Field(default_factory=list, max_length=4)
+
+
+class InvestigationPlanV2(InvestigationPlan):
+    tool_calls: list[PlannedToolV2] = Field(default_factory=list,max_length=4)
 
 
 class QuestionUpdate(Strict):

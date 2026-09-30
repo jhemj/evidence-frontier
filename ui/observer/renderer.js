@@ -14,8 +14,8 @@
     call(method,arg){const adapter=this.adapter;try{Promise.resolve(adapter[method](arg)).catch(()=>{if(this.adapter===adapter)this.fallback();});}catch(_){if(this.adapter===adapter)this.fallback();}}
     update(input){
       // Exactly four display inputs cross the boundary; text/IDs/graphs do not.
-      this.input=Object.freeze({base:['working','searching','thinking','organizing','concerned','waiting','offline','ended','idle'].includes(input.base)?input.base:'idle',
-        transient:['updated','counterpoint','corrected','happy'].includes(input.transient)&&
+      this.input=Object.freeze({base:['working','searching','gathering','gathering_waiting','thinking','organizing','concerned','waiting','offline','ended','idle'].includes(input.base)?input.base:'idle',
+        transient:['updated','counterpoint','corrected','happy','disappointed'].includes(input.transient)&&
           !(input.transient==='happy'&&['warning','error'].includes(input.severity))?input.transient:'none',
         severity:['warning','error'].includes(input.severity)?input.severity:'info',
         motionAllowed:!!(this.motion&&!this.reduced&&this.visible&&!this.hidden)});

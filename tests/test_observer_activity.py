@@ -49,12 +49,12 @@ def test_actual_input_subjects_not_current_claim_titles_or_invented_execution():
     assert a['context']['input_id'] == 'I'
 
 
-def test_explicit_request_start_is_required_for_running_model():
+def test_explicit_request_start_is_dispatch_evidence_not_generation():
     rows = fixture()
     rows[-1]['request_started_at'] = '2026-01-01T00:01:00Z'
     a = item(view(rows))
-    assert a['state'] == 'running' and a['timer_at'] == rows[-1]['request_started_at']
-    assert a['timer_origin'] == 'execution'
+    assert a['state'] == 'waiting' and a['timer_at'] == rows[-1]['request_started_at']
+    assert a['timer_origin'] == 'dispatch'
 
 
 def test_cross_generation_subjects_and_receipts_do_not_attach():
@@ -101,17 +101,18 @@ def test_browser_work_description_uses_concrete_subjects_and_honest_lifecycle():
     assert binary, 'Node is required for display contracts'
     a = item(view(fixture()))
     failed = copy.deepcopy(a)
-    failed.update(state='failed', failure={'title': '원문 확인 실패', 'subject_ids': ['D1'],
+    failed.update(state='failed', failure_impact='unresolved', failure={'title': '원문 확인 실패', 'subject_ids': ['D1'],
                                          'reason': '인용 불일치', 'impact': '검증되지 않은 부분은 미채택'})
     script = """
 const a=require('node:assert/strict'),m=require(process.argv[1]),[prepared,failed]=JSON.parse(process.argv[2]);
 const v={case:{status:'running'}};
 let x=m.activity(v,[prepared]);
 a.ok(x.label.includes('inspect --item 0'));a.equal(x.subjects.length,3);
-a.ok(x.statusNote.includes('실행 상태'));a.ok(!x.label.includes('기다리고'));
+a.ok(x.statusNote.includes('요청 전송'));a.ok(!x.label.includes('기다리고'));
 x=m.activity(v,[{...prepared,state:'running'}]);a.ok(x.label.includes('검토하고 있어요'));
 x=m.failure(failed);a.ok(x.label.includes('inspect --item 1'));a.ok(!x.label.includes('inspect --item 0'));
-a.ok(m.activity(v,[failed]).label.includes('inspect --item 1'));
+a.equal(m.activity(v,[failed]).base,'idle');a.ok(m.activity(v,[failed]).label.includes('실행 중인 작업은 없어요'));
+a.equal(m.recentFailure([failed]).id,failed.id); // warning remains separate from current work
 a.equal(m.activity(v,[prepared,failed]).base,'waiting');
 """
     r = subprocess.run([binary, '-e', script, str(ROOT/'ui/observer/moa.js'), json.dumps([a, failed])],

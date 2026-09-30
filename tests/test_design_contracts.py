@@ -164,10 +164,11 @@ def test_model_change_during_pack_is_rejected_before_reservation(tmp_path,monkey
     from workbench.dossiers import finish
     from workbench.review_context import fit_metadata_only as fit
     c,cid,e,t,o=setup(tmp_path)
-    def changed(pack,maximum=36000):
-        fit(pack,maximum)
+    def changed(pack,maximum=36000,*,request_spec=None):
+        compiled=fit(pack,maximum,request_spec=request_spec)
         config=c.store.list('config')[-1]
         c.store.update(config['id'],provider={**config['provider'],'model':'changed'})
+        return compiled
     monkeypatch.setattr('workbench.review_context.fit_metadata_only',changed)
     def forbidden(*a,**k):raise AssertionError('model transmission must not occur')
     monkeypatch.setattr('workbench.dossiers.Provider.generate',forbidden)

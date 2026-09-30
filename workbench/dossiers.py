@@ -48,6 +48,58 @@ def belongs(row,task):
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
 
+class ReceiptBindingError(ValueError):
+    """A returned transport receipt cannot rewrite its prepared input binding."""
+    category='model_receipt_binding_conflict'
+
+    def __init__(self,fields):
+        self.fields=sorted(set(fields))
+        super().__init__('Model receipt conflicts with Controller binding: '+', '.join(self.fields))
+        self.metadata={'failure_category':self.category,'conflicting_fields':self.fields}
+
+
+def model_receipt_fields(context,receipt,fixed,input_record):
+    """Compose exact shared fields, never silently overwrite either origin.
+
+    The input record proves the locally prepared native envelope. An identical
+    Provider field corroborates that *native* identity; it does not establish a
+    Codex wrapper hash, request delivery, or retained server input. Any actual
+    transport/adapter receipt fields remain separate and are retained unchanged.
+    Legacy mocks that supply no compiled identity stay explicitly unobserved.
+    """
+    from .request_lifecycle import reference
+    if not all(isinstance(value,dict) for value in (context,receipt,fixed,input_record)):
+        raise ReceiptBindingError(['metadata_shape'])
+    reserved={'id','kind','case_id','created_at','compiled_request_provenance'}
+    conflicts=reserved & (set(context)|set(receipt)|set(fixed))
+    def encoded(value):
+        return json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':'),allow_nan=False)
+    result={}
+    for key in set(context)&set(input_record):
+        try:
+            if encoded(context[key])!=encoded(input_record[key]):conflicts.add(key)
+        except (TypeError,ValueError):conflicts.add(key)
+    if context.get('input_record_id')!=input_record.get('id'):conflicts.add('input_record_id')
+    for origin in (fixed,context,receipt):
+        for key,value in origin.items():
+            try:
+                if key in result and encoded(result[key])!=encoded(value):conflicts.add(key)
+                else:
+                    encoded(value)  # Storage cannot preserve a non-JSON value.
+                    if key not in result:result[key]=deepcopy(value)
+            except (TypeError,ValueError):conflicts.add(key)
+    if conflicts:raise ReceiptBindingError(conflicts)
+    prepared=context.get('compiled_request')
+    provider=receipt.get('compiled_request')
+    result['compiled_request_provenance']={
+        'prepared_input_ref':reference(input_record),
+        'provider_field_present':'compiled_request' in receipt,
+        'provider_native_identity_equal':True if prepared is not None and provider is not None else None,
+        'request_attempt_id':receipt.get('request_attempt_id'),
+        'scope':'Native requested envelope only; adapter/wire identity and delivery require their separate transport receipts.'}
+    return result
+
+
 def is_repair(task):return task.get('repair_generation')==task.get('retry_generation',0)
 
 def relevant_jobs(store,batch):
@@ -101,6 +153,13 @@ def input_projection_failure(store, cid, task, batch, error):
         diagnostic = store.add('review_diagnostic',cid,task_id=task['id'],batch_id=batch['id'],
             failure_category='input_projection',error=str(error),rejected_output=None,
             model_called=False,model_attempts_unchanged=current['attempts'])
+        from .request_lifecycle import RequestAttempt
+        preparation=RequestAttempt(store,cid,task,role='judgment',
+            owner_records=[store.get(did) for did in batch['dossier_ids']],
+            evidence_id=batch.get('evidence_id'),logical_work_id=batch['id']+':input_preparation')
+        preparation.emit('input_preparing')
+        preparation.emit('failed',failure_category='input_projection',request_attempted=False)
+        preparation.finish('input_blocked')
         if len(batch['dossier_ids']) > 1:
             store.update(batch['id'],status='split',termination='input_projection_split',
                          input_diagnostic_id=diagnostic['id'])
@@ -328,11 +387,15 @@ def _prepare_queue(controller,cid,evidence,task):
         if admit(controller,cid,evidence,task):
             batches=[b for b in store.list('dossier_batch',cid) if belongs(b,task)]
     indexed_dossiers={d['id']:d for d in store.list('dossier',cid) if belongs(d,task)}
-    from .review_policy import returned_rank
-    intents=store.list('test_intent',cid)
-    queue=sorted((b for b in batches if b['status'] not in terminal),
-        key=lambda b:((returned_rank(b,intents),) if task.get('review_queue_policy')=='returned-first-v1' else ())
-            +question_engine.batch_priority(b,memory['questions'],indexed_dossiers))
+    queued=[b for b in batches if b['status'] not in terminal]
+    priority=lambda b:question_engine.batch_priority(b,memory['questions'],indexed_dossiers)
+    if task.get('review_queue_policy')=='returned-first-v1':
+        from .review_policy import order_queue
+        queue=order_queue(queued,store.list('test_intent',cid),store.list('investigation_job',cid),
+            task,priority,evidence=evidence,dossiers=indexed_dossiers,available_observation_ids={o['id'] for o in
+                controller.active_observations(cid) if o.get('evidence_id')==evidence['id']})
+    else:
+        queue=sorted(queued,key=priority)
     return task,memory,batches,queue
 
 
@@ -401,25 +464,40 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             store.update(cid,result_revision=record['id'],investigation_result='단서별 AI 판단 완료 · 확인 / 유력 / 미확인',investigation_stage='결과 패키지 생성')
         return result
     if batch['status']=='await_checks':
+        from .review_policy import record_selection
+        record_selection(store,cid,task,batch)
         for jid in batch['job_ids']:
             job=store.get(jid)
             if job['status']=='ingested':continue
+            collector=getattr(controller,'result_collector',None)
+            if collector is not None and collector.enabled and job.get('collector_terminal_receipt_id'):
+                return None  # Retained late/quarantined result is not current adoption.
             request=tool_scope(job['request'])
             body={'job_key':job['fingerprint'],'signature':evidence['signature'],'action':'investigation_tool','path':evidence['path'],
                 'investigation':{'evidence_path':evidence['path'],'run_id':job['source_run'],'request':request,'target_os':store.get(cid).get('target_os','linux')}}
             try:
                 if job['status']=='admitted':
                     if not job.get('dispatched_at'):store.update(jid,dispatched_at=now())
-                    worker_request('POST','/jobs',json=body,timeout=20);store.update(jid,status='submitted')
+                    worker_request('POST','/jobs',json=body,timeout=20)
+                    with store.tx():
+                        fresh=store.get(jid)
+                        if fresh.get('status')!='ingested' and not fresh.get('collector_terminal_receipt_id'):
+                            store.update(jid,status='submitted')
                 reply=worker_request('GET','/jobs/'+job['fingerprint'],timeout=20)
             except httpx.TransportError:return None
             if reply['status'] in ('queued','running'):
                 if job.get('worker_status')!=reply['status']:store.update(jid,worker_status=reply['status'])
                 return None
+            if collector is not None and collector.enabled:
+                collector.ingest_status(job,reply)
+                return None
             if reply['status']=='execution_unknown':raise ExecutionUnknown('추가 검사의 이전 실행 상태가 불명확합니다.')
             result=reply.get('result') or {'status':'failed','complete':False,'observations':[],'error':reply.get('error')}
             if reply.get('result') and digest(result)!=reply['result_sha256']:raise ValueError('추가 검사 결과 해시 불일치')
             with store.tx():
+                # Optional independent collection may have committed while
+                # this legacy poll was outside the Store transaction.
+                if store.get(jid).get('status')=='ingested':return None
                 ids=store_tool_result(controller,cid,evidence,task,result,job['request'])
                 store.update(jid,status='ingested',observation_ids=ids,result_status=result['status'],result_scope={k:v for k,v in result.items() if k!='observations'},ended_at=now(),error=result.get('error'))
                 question_engine.finish_intents(store,cid,store.get(jid))
@@ -455,7 +533,10 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             store.update(batch['id'],status='failed',unassessed_checks=missing)
         return None
     if not controller.model_lock.acquire(blocking=False):return None
+    request_attempt=None
     try:
+        from .review_policy import record_selection
+        record_selection(store,cid,task,batch)
         dossiers=[store.get(did) for did in batch['dossier_ids']]
         all_obs={o['id']:o for o in controller.active_observations(cid) if o['evidence_id']==evidence['id']}
         from . import objection_ledger
@@ -471,6 +552,10 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             checks.append({'id':job['id'],'request':tool_scope(job['request']),
                 'contracts':[c for c in contracts(job) if c['dossier_id'] in batch['dossier_ids']],
                 'status':job.get('result_status'),'scope':job.get('result_scope',{}),'observation_ids':job.get('observation_ids',[])})
+            if task.get('test_contract_policy')=='purpose-outcomes-v2':
+                from .test_contract_v2 import digest as result_digest
+                checks[-1]['result_revision']=result_digest({'job_id':job['id'],
+                    'observation_ids':job.get('observation_ids',[]),'scope':job.get('result_scope') or {}})
         ids=list(dict.fromkeys(oid for oid in ids if oid in all_obs))
         compact=[]
         for oid in ids:
@@ -496,6 +581,11 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
         from .test_admission import catalog
         pack['tool_capabilities']=catalog(pack['target_os'])
         pack['question_context']=question_engine.view(memory)
+        from .test_context_projection import attach as attach_test_context, fit_presented, source_run_id
+        test_source_run=source_run_id(all_obs.values())
+        from .recovery_integration import supply_pending_body_views
+        supply_pending_body_views(pack,store,cid,task,evidence,test_source_run)
+        attach_test_context(pack,store,cid,task,evidence,test_source_run)
         # Compact excerpts, not the membership of a review unit. A record must
         # not count as AI-presented when it disappeared to satisfy prompt limits.
         ids=[o['id'] for o in pack['observations']]
@@ -522,6 +612,10 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
         if batch.get('validation_feedback'):pack['validation_feedback']=batch['validation_feedback']
         from .review_context import fit_metadata_only as fit, InputBudgetError
         from . import review_stream
+        from .request_compiler import request_spec,compile_spec,REVIEW_QUESTIONS
+        provider_config=store.list('config')[-1]['provider']
+        review_question=REVIEW_QUESTIONS['judgment']
+        spec=request_spec(provider_config,review_question,'judgment')
         canonical=deepcopy(pack)
         input_maximum=batch.get('review_input_maximum',36000)
         dependencies=dependency_fingerprint(store,batch)
@@ -541,21 +635,24 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             if stream_id:
                 pack,stream_meta=review_stream.prepare(store,cid,stream_id)
             else:
-                try:fit(pack,input_maximum)
+                try:fit_presented(pack,fit,store,cid,task,evidence,test_source_run,input_maximum,request_spec=spec)
                 except InputBudgetError:
                     if len(batch['dossier_ids'])>1:raise
-                    stream=review_stream.start(store,cid,task,batch,canonical,maximum=input_maximum)
+                    stream=review_stream.start(store,cid,task,batch,canonical,maximum=input_maximum,request_spec=spec)
                     pack,stream_meta=review_stream.prepare(store,cid,stream['id'])
             if stream_meta:
                 if batch.get('validation_feedback'):
                     pack['validation_feedback']=deepcopy(batch['validation_feedback'])
-                    fit(pack)
+                    fit_presented(pack,fit,store,cid,task,evidence,test_source_run,request_spec=spec)
                 # Validation sees exact predicates and only the current page's
                 # sources. A compressed model view cannot mutate that contract.
                 validation_pack=review_stream.resolved(pack)
                 ids=[o['id'] for o in validation_pack['observations']]
                 allowed_by_dossier=validation_pack['allowed_observation_ids_by_dossier']
                 checks=validation_pack['executed_checks']
+            if stream_meta:
+                fit_presented(pack,fit,store,cid,task,evidence,test_source_run,input_maximum,request_spec=spec)
+            compiled_request=compile_spec(spec,pack).assert_fits()
         except (InputBudgetError,review_stream.ProjectionTooLarge) as ex:
             input_projection_failure(store,cid,task,batch,ex)
             return None
@@ -563,6 +660,7 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
                  'generation':task.get('retry_generation',0),'round':batch['round'],'attempt':batch['attempts']+1}
         context['dossier_allowed_ids']=allowed_by_dossier
         context['prompt_version']='forensic-provider-5'
+        context['compiled_request']=compiled_request.identity
         if stream_meta:context['review_stream']=stream_meta
         from .evidence_spans import manifest
         presentation=manifest(pack)
@@ -586,16 +684,22 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             context['input_record_id']=input_record['id']
             store.update(batch['id'],attempts=batch['attempts']+1,active_attempt_id=input_record['id'])
         store.update(cid,investigation_stage=f"단서별 정황·반증 검토 {sum(b['status']=='done' for b in batches)+1}/{len(batches)}")
-        output=None;receipt={};issues=[]
+        from .request_lifecycle import RequestAttempt
+        request_attempt=RequestAttempt(store,cid,task,role='judgment',input_record=input_record,
+            evidence_id=evidence['id'],owner_records=[store.get(did) for did in batch['dossier_ids']],
+            reservation_id=input_record['id'],
+            logical_work_id=batch['id']+':'+str(batch['round'])+':'+digest(stream_meta))
+        output=None;receipt={};receipt_fields=None;issues=[]
         try:
-            output,receipt=consult(provider_config,
-                '기본 점검 영역과 단서 각각을 독립적으로 검토하세요. 같은 자료의 반복을 독립 근거로 세지 마세요. '
-                '가장 타당한 설명·반대 근거·확인 가능한 다음 검사를 작성하세요. 제공된 각 dossier_id당 하나의 판단이 필요합니다.',pack,role='judgment',provider_factory=Provider)
+            output,receipt=request_attempt.consult(consult,provider_config,
+                review_question,pack,role='judgment',provider_factory=Provider,compiled_request=compiled_request)
             model_availability.recovered(store,cid,receipt.get('transport_identity'))
+            request_attempt.emit('validating',validation_stage='source_and_check_contract')
             issues=validation_errors(output,batch['dossier_ids'],ids,allowed_by_dossier,presented_observations,
                 require_literals=task.get('review_policy')=='autonomous-v1',canonical_observations=all_obs)
             from .review_validation import check_errors
-            issues += check_errors(output, checks, allowed_by_dossier)
+            issues += check_errors(output, checks, allowed_by_dossier,
+                presented_observations=presented_observations,canonical_observations=all_obs)
             issues += objection_ledger.errors(output,pack.get('open_objections',[]),allowed_by_dossier,
                 intermediate=bool(stream_meta and stream_meta['phase']!='synthesis'))
             from .review_focus import project
@@ -609,29 +713,48 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             if task.get('review_policy')=='autonomous-v1' and not (stream_meta and stream_meta['phase']!='synthesis'):
                 from .presentation_claims import bind
                 output['findings']=[bind(f,presented_observations) for f in output['findings']]
+            is_page=bool(stream_meta and stream_meta['phase']!='synthesis')
+            try:
+                receipt_fields=model_receipt_fields(context,receipt,{
+                    'task_id':task['id'],'evidence_id':evidence['id'],'batch_id':batch['id'],
+                    'receipt_type':'dossier_page_model' if is_page else 'dossier_model'},input_record)
+            except ReceiptBindingError as ex:
+                issues=[{'code':ex.category,'conflicting_fields':ex.fields}]
+                raise
         except (ValueError,httpx.TransportError) as ex:
             if model_availability.unavailable(ex):
+                request_attempt.fail(ex,outcome='service_unavailable')
                 with store.tx():
                     model_availability.defer(store,cid,task,ex,batch_id=batch['id'],input_record_id=input_record['id'])
                     if store.get(batch['id']).get('active_attempt_id')==input_record['id']:
                         store.update(batch['id'],attempts=batch['attempts'],active_attempt_id=None)
                 return None
             from .review_diagnostics import classify, repair_feedback, smaller_input_budget
-            category=classify(ex,issues)
+            category=ex.category if isinstance(ex,ReceiptBindingError) else classify(ex,issues)
             with store.tx():
                 diagnostic=store.add('review_diagnostic',cid,task_id=task['id'],batch_id=batch['id'],
                     rejected_output=output,raw_output=getattr(ex,'raw_output',None),failure_category=category,
                     validation_errors=issues,error=str(ex),
                     model_metadata={**getattr(ex,'metadata',{}),
                         **{k:v for k,v in receipt.items() if k!='output'}},**context)
+                from .recovery_integration import rejected_schema_hints, bind_recovery_feedback
+                schema_hints=rejected_schema_hints(store,cid,task,evidence,test_source_run,
+                    input_record,ex,diagnostic['id'])
                 store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],receipt_type='dossier_model_error',
                     batch_id=batch['id'],error=str(ex),failure_category=category,validation_errors=issues,diagnostic_id=diagnostic['id'],**context)
                 from .partial_review import isolate
                 if (dependency_fingerprint(store,batch)==dependencies
                     and isolate(store,cid,task,batch,output,issues,presented_observations,context,diagnostic['id'])):
+                    partial=store.get(batch['id'])
+                    accepted=set(partial.get('accepted_dossier_ids',[]))
+                    request_attempt.accept([store.get(partial['receipt_id'])]+[store.get(did) for did in sorted(accepted)],
+                        rejected_records=[store.get(did) for did in batch['dossier_ids'] if did not in accepted],
+                        phase='partial_accepted',scope='independent_validated_findings')
                     return None
+                request_attempt.fail(ex)
                 if store.get(batch['id']).get('active_attempt_id')==input_record['id']:
-                    store.update(batch['id'],validation_feedback=repair_feedback(ex,issues,diagnostic['id']))
+                    store.update(batch['id'],validation_feedback=bind_recovery_feedback(
+                        repair_feedback(ex,issues,diagnostic['id']),schema_hints))
                     if category=='input_context_pressure':
                         smaller=smaller_input_budget(input_maximum,getattr(ex,'metadata',{}))
                         if stream_meta:
@@ -653,19 +776,23 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
                     rejection='stale_review_scope',**context)
                 store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],receipt_type='dossier_model_error',
                     batch_id=batch['id'],error='검토 중 근거 또는 작업 범위 변경',**context)
+                request_attempt.emit('rejected',rejected_refs=request_attempt.owner_refs,
+                    failure_category='stale_review_scope')
+                request_attempt.finish('stale_scope')
                 return None
             is_page=stream_meta and stream_meta['phase']!='synthesis'
-            r=store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],
-                receipt_type='dossier_page_model' if is_page else 'dossier_model',batch_id=batch['id'],**context,**receipt)
+            r=store.add('receipt',cid,**receipt_fields)
             discovered=objection_ledger.capture(store,cid,task,output,r['id'],
                 manifest(selected_pack) if is_page else presentation)
             if is_page:
                 review_stream.accept_page(store,batch,stream_meta,output,r['id'],ids,
                     objection_ids=list(dict.fromkeys(discovered+[o['id'] for o in pack.get('open_objections',[])])),
                     presented_pack=pack)
+                request_attempt.accept([r],phase='page_accepted',scope='intermediate_page_not_final_judgment')
                 return None
             objection_ledger.resolve(store,output,r['id'])
-            question_engine.record_check_assessments(store,cid,task,output,r['id'])
+            question_engine.record_check_assessments(store,cid,task,output,r['id'],
+                presented_observations=presented_observations)
             output=objection_ledger.qualify(output,objection_ledger.current(store,cid,task,batch['dossier_ids']))
             if stream_meta:review_stream.complete(store,stream_meta,r['id'])
             from .card_evolution import assessment_revision
@@ -689,7 +816,8 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
                     set(store.get(call['hypothesis_id']).get('observation_ids',[]))),None)
                 linked_question=linked_question or next((q for q in memory['questions'] if q.get('source_kind')=='case_question'),
                     {'question_key':call['hypothesis_id'],'version':batch['round']})
-                intent=question_engine.reserve(store,cid,task,linked_question,call,evidence,source_run)
+                intent=question_engine.reserve(store,cid,task,linked_question,call,evidence,source_run,
+                    source_record_id=input_record['id'])
                 if not intent['admission']['eligible']:
                     deferred.append({'request':call,'reason':intent['admission']['reason'],'test_intent_id':intent['id']});continue
                 if store.get(cid).get('target_os')=='windows' and call['tool'] not in ('search','read_source','correlate'):
@@ -702,6 +830,18 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
                 old=reusable(jobs,fingerprint,call,source_run=source_run,evidence_id=evidence['id'])
                 if old:
                     old=store.get(old['id'])
+                    if call.get('test_design',{}).get('version')==2 and old['status']=='ingested' and contract(call) not in contracts(old):
+                        from .test_contract_v2 import bind_existing_result
+                        parents=contracts(old)
+                        if not parents:
+                            deferred.append({'request':call,'reason':'internal_reference_error','test_intent_id':intent['id']});continue
+                        parent=next((p for p in parents if p['dossier_id']==call['hypothesis_id']),parents[0])
+                        call,binding=bind_existing_result(store,cid,task,evidence,source_run,call,intent,old,
+                            input_record['id'],parent_contract=parent)
+                        intent=question_engine.reserve(store,cid,task,linked_question,call,evidence,source_run,
+                            source_record_id=binding['id'])
+                        if not intent['admission']['eligible']:
+                            deferred.append({'request':call,'reason':intent['admission']['reason'],'test_intent_id':intent['id']});continue
                     bind_reuse(store,cid,old,intent)
                     new_contract=contract(call) not in contracts(old)
                     old=store.update(old['id'],dossier_ids=list(dict.fromkeys(old.get('dossier_ids',[old['request'].get('hypothesis_id')])+[call['hypothesis_id']])),contracts=attach(old,call),
@@ -755,5 +895,9 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
                         reopen_on={'related_source_version_change':True,'new_question_or_objection_link':True},
                         assessment_history=assessment_revision(store.get(f['dossier_id']),accepted,r['id'],published=True))
                 store.update(batch['id'],status='done',deferred_checks=deferred)
+            request_attempt.accept([r]+[store.get(did) for did in batch['dossier_ids']],scope='validated_dossier_review')
         return None
-    finally:controller.model_lock.release()
+    finally:
+        if request_attempt is not None and not request_attempt.ended:
+            request_attempt.finish('controller_exit_without_adoption')
+        controller.model_lock.release()

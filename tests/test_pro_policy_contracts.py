@@ -47,7 +47,9 @@ def test_returned_priority_and_audit_preserve_logical_physical_difference():
         'assessment_status':'unassessed','result_scope':{'job_id':'j'}},
         {'kind':'test_intent','id':'b','status':'complete','scope':{'task_id':'t'},
         'assessment_status':'unassessed','result_scope':{'job_id':'j'}}]
-    assert returned_rank({'job_ids':['j']},intents)==0
+    # A physical ID intersection alone is not proof of the logical owner or
+    # current usable scope. The opt-in scheduler requires the actual job.
+    assert returned_rank({'job_ids':['j']},intents)==1
     assert returned_rank({'job_ids':['other']},intents)==1
     result=audit([{'kind':'task','id':'t'}, {'kind':'investigation_job','id':'j','task_id':'t',
         'request':{'tool':'search','query':'fixture'}},*intents])['returned_unassessed']

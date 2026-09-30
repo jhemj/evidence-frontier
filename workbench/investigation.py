@@ -178,11 +178,24 @@ def evidence_pack(controller, case_id, question='', preferred=(), evidence_id=No
             'dynamic_hypotheses_total': dynamic_total, 'dynamic_hypotheses_omitted': max(0, dynamic_total-12)}
 
 
-def store_tool_result(controller, case_id, evidence, task, result, request):
+def store_tool_result(controller, case_id, evidence, task, result, request, *, bounded_lookup=False):
     receipt = controller.store.add('receipt', case_id, task_id=task['id'], evidence_id=evidence['id'], receipt_type='investigation_tool',
                                    request=request, result={k: v for k, v in result.items() if k != 'observations'}, output_count=len(result.get('observations', [])))
     ids = []
-    known={o['digest']:o for o in controller.store.list('observation',case_id) if o.get('digest')}
+    if bounded_lookup:
+        # Collector invokes this inside its writer-fenced transaction. Only
+        # materialize matching canonical observations; never parse the entire
+        # case ledger in Python while holding the writer transaction.
+        digests=list(dict.fromkeys(hashlib.sha256(json.dumps([evidence['id'],event],
+            sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+            for event in result.get('observations',[])))
+        if len(digests)>128:raise ValueError('bounded result ingest limit exceeded')
+        rows=controller.store.db.execute("SELECT body FROM records WHERE kind='observation' AND case_id=? "
+            "AND json_extract(body,'$.digest') IN ("+','.join('?' for _ in digests)+")",
+            [case_id,*digests]).fetchall() if digests else []
+        known={o['digest']:o for o in (json.loads(row[0]) for row in rows)}
+    else:
+        known={o['digest']:o for o in controller.store.list('observation',case_id) if o.get('digest')}
     for event in result.get('observations', []):
         digest = hashlib.sha256(json.dumps([evidence['id'], event], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         ob = known.get(digest)

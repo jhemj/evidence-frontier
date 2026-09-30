@@ -32,7 +32,9 @@ def test_defaults_keep_generation_limits_but_enable_guided_strategy():
 
 
 def test_truncated_output_error_retains_generation_metadata():
-    p=Provider({**CONFIG,'num_predict':512,'num_ctx':4096})
+    # Enough input context for the real system/procedure/schema envelope;
+    # this test isolates an actually returned truncated output, not preflight.
+    p=Provider({**CONFIG,'num_predict':512,'num_ctx':32768})
     p.client.close()
     p.client=httpx.Client(transport=httpx.MockTransport(lambda request:httpx.Response(200,json={
         'done_reason':'length','message':{'content':'{"summary":"partial"}'},

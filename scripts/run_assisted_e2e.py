@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -98,6 +99,8 @@ def _split_transport_budget(receipt: dict[str, Any], luna_receipt: dict[str, Any
         "requested_ollama": requested_ollama,
         "actual_luna_transport": {
             "transport": "codex-luna-test-only",
+            **{key:luna_receipt[key] for key in ('input_sha256','input_utf8_bytes','output_schema_sha256',
+                'schema_utf8_bytes','input_envelope_basis') if key in luna_receipt},
             "input_tokens": usage.get("input_tokens"),
             "output_tokens": usage.get("output_tokens"),
             "usage": dict(usage),
@@ -195,7 +198,8 @@ def install_assisted_provider(analysis_root: Path, driver_path: Path | None = No
 
     Provider.response = recorded_response
 
-    def assisted(self, question, pack, role="analyst"):
+    def assisted(self, question, pack, role="analyst", *, attempt=None, emit=None):
+        if emit is not None:self.bind_lifecycle(attempt,emit)
         if role not in allowed_roles:
             return original(self, question, pack, role=role)
         captured: dict[str, Any] = {}
@@ -218,7 +222,11 @@ def install_assisted_provider(analysis_root: Path, driver_path: Path | None = No
             captured["payload"] = payload
             schema = review_output_schema(role,pack) if role in ('judgment','synthesis') else {'falsifier':Falsification,'investigator':InvestigationPlan,'analyst':Analysis}[role]
             output_schema = payload.get('format') if isinstance(payload.get('format'),dict) else schema.model_json_schema()
-            content, luna_receipt = infer(payload["messages"], output_schema, transport_root)
+            parameters=inspect.signature(infer).parameters
+            supports_callback='emit' in parameters or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+            kwargs={'emit':self._emit} if supports_callback and getattr(self,'_lifecycle_emit',None) is not None else {}
+            content, luna_receipt = infer(payload["messages"], output_schema, transport_root,**kwargs)
             captured["luna_receipt"] = luna_receipt
             self._request_attempted=luna_receipt.get('request_attempted')
             return {"done_reason": "stop", "message": {"content": content}, "eval_count": luna_receipt.get("usage", {}).get("output_tokens", 0)}

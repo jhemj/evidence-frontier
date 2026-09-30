@@ -17,7 +17,7 @@ ROOT=Path(__file__).resolve().parent.parent
 
 
 class Controller:
-    def __init__(self,store,evidence_root):
+    def __init__(self,store,evidence_root,*,result_collector_enabled=False,result_collector_options=None):
         self.store=store
         self.evidence_root=Path(evidence_root)
         self.wake=threading.Event()
@@ -28,11 +28,34 @@ class Controller:
         self.runtime_code=code_identity()
         from .procedures import snapshot
         snapshot()  # Pin shipped procedure bytes when the runtime is loaded.
+        # Separate experiment, off by default. No thread/model/job is created
+        # merely by constructing a Controller (including API fixture mode).
+        self.result_collector=None
+        if result_collector_enabled:
+            from .result_collector import ResultCollector
+            self.result_collector=ResultCollector(self,enabled=True,**(result_collector_options or {}))
 
     def runtime_binding(self):
         from .runtime_contract import binding
         configs=self.store.list('config');provider=configs[-1].get('provider',{}) if configs else {}
-        return binding(self.runtime_code,provider)
+        value=binding(self.runtime_code,provider)
+        if self.result_collector is not None and self.result_collector.enabled:
+            from .result_collector import VERSION
+            # Enabling collection is an explicit experiment condition, not a
+            # runtime toggle that can silently reinterpret a preserved case.
+            value['worker_result_collector']=VERSION
+            value.pop('fingerprint',None)
+            value['fingerprint']=hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
+        annotator=getattr(self,'jev_annotator',None)
+        if annotator is not None:
+            value['jev_annotation']={'model':annotator.model,'manifest_digest':annotator.manifest_digest,
+                'template_sha256':annotator.template_sha256,'tokenizer_sha256':annotator.tokenizer_sha256,
+                'mode':'installed-uncalibrated-annotation','limit':annotator.limit,
+                'interval_seconds':annotator.interval,'probabilities_available':False,
+                'adjudication_authority':False,'resource_group':annotator.broker.group}
+            value.pop('fingerprint',None)
+            value['fingerprint']=hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
+        return value
 
     def recover(self):
         with self.store.tx():
@@ -147,6 +170,73 @@ class Controller:
             self.store.audit(case_id,'epoch_started',epoch_id=epoch['id'])
         self.wake.set();return c
 
+    def initial_discovery_plan(self,case_id,evidence,task,source_run,calls):
+        """Bind Controller-created collection, not a fabricated discriminator.
+
+        The initial worker requests precede any model plan. Opt-in V2 still
+        requires their exact question, scope and saved input manifest; the
+        legacy seed remains byte-for-byte unchanged. No observation body or
+        hypothesis judgment is produced by this contract builder.
+        """
+        from copy import deepcopy
+        from .test_contract_v2 import POLICY,UNSUPPORTED,build_manifest,object_ref
+        if task.get('test_contract_policy','legacy')!=POLICY:
+            return {'tool_calls':deepcopy(calls)}
+        current_task=self.store.get(task['id'],'task')
+        current_evidence=self.store.get(evidence['id'],'evidence')
+        generation=task.get('retry_generation',0)
+        if (current_task.get('case_id')!=case_id or current_task.get('evidence_id')!=evidence['id']
+                or current_task.get('retry_generation',0)!=generation or current_task.get('superseded')
+                or current_task.get('test_contract_policy','legacy')!=POLICY
+                or current_evidence.get('case_id')!=case_id or not current_evidence.get('connected',True)
+                or current_evidence.get('superseded') or current_evidence.get('path')!=evidence.get('path')
+                or current_evidence.get('signature')!=evidence.get('signature')
+                or not any(r.get('evidence_id')==evidence['id'] and r.get('result',{}).get('run_id')==source_run
+                           for r in self.store.list('receipt',case_id))):
+            raise ValueError('Initial discovery has no current task/evidence/source scope')
+        from . import question_engine
+        memory=question_engine.refresh(self,case_id,current_evidence,current_task)
+        # This is a Controller-owned case question, not the first hypothesis or
+        # a title-similarity guess. Its stable version is offered in the input.
+        questions=[q for q in memory['questions'] if q.get('source_kind')=='case_question'
+            and q.get('task_id')==task['id'] and q.get('evidence_id')==evidence['id']
+            and q.get('generation',0)==generation]
+        if len(questions)!=1:raise ValueError('Initial discovery requires one exact case question')
+        question=questions[0]
+        context=build_manifest(self.store,case_id,current_task,current_evidence,source_run,
+            owners=[question],questions=[question])
+        from .models import TestDesignV2
+        from .test_admission import catalog
+        capabilities=catalog(self.store.get(case_id).get('target_os','linux'))
+        rules={k:UNSUPPORTED for k in ('supports','refutes','inconclusive','found',
+                                      'no_match_in_scope','partial','unavailable')}
+        rules.update(found='Requested records or associations are returned within this collection scope; interpretation remains separate.',
+            no_match_in_scope='A complete requested collection scope returns no matching record or association; this is not historical absence.',
+            partial='Only part of the requested collection scope is available; retain the uncovered range.',
+            unavailable='This execution cannot obtain the requested collection; retain its typed failure and scope.')
+        typed=[]
+        for original in calls:
+            call=deepcopy(original)
+            tool=call.get('tool')
+            if tool not in capabilities:raise ValueError('Unsupported initial discovery tool')
+            observable=capabilities[tool][0]
+            view='body_excerpt' if tool in ('read_file','read_source') else 'metadata'
+            call.update(question_id=question['id'],success_condition=rules['found'],
+                refutation_condition='',inconclusive_condition=rules['partial'])
+            call['test_design']=TestDesignV2.model_validate({'version':2,'purpose':'discover',
+                'immediate_observable':observable,'owner_ref':object_ref(question),
+                'question_ref':object_ref(question),'target_ref':None,'target_scope':context['scope'],
+                'target_proposition':'','required_inputs':[],'baseline_ref':None,
+                'required_result_view':view,'outcome_rules':rules,
+                'allowed_outcomes':['found','no_match_in_scope','partial','unavailable'],
+                'design_timing':'before_result','uses_existing_result':False,'lineage':None,
+                'expected_update':'Collect current source context for later interpretation; not execution, authorization or intrusion proof.',
+                'reopen_on':'Changed source run, collection object, requested range or extraction capability.'}).model_dump()
+            typed.append(call)
+        return {'tool_calls':typed,'test_contract_context':context,
+            'question_context':question_engine.view(memory),'evidence_id':evidence['id'],
+            'generation':generation,'proposal_origin':'controller_initial_discovery'}
+
     def ensure_investigation(self,case_id):
         """Upgrade existing disk cases by adding content work; keep integrity receipts."""
         from .investigation import seed
@@ -158,7 +248,8 @@ class Controller:
         investigate_action='windows_investigate' if platform=='windows' else 'linux_investigate'
         configs=self.store.list('config');provider=configs[-1].get('provider',{}) if configs else {}
         policies={k:provider.get(k,default) for k,default in
-            (('second_review_policy','always'),('review_queue_policy','question-priority-v1'))}
+            (('second_review_policy','always'),('review_queue_policy','question-priority-v1'),
+             ('test_contract_policy','legacy'),('recovery_policy','disabled'))}
         for evidence in self.store.list('evidence',case_id):
             supported=WINDOWS_EXTENSIONS if platform=='windows' else ('.e01','.raw','.dd','.img')
             if not evidence.get('connected',True) or Path(evidence['path']).suffix.lower() not in supported:continue
@@ -458,6 +549,15 @@ class Controller:
         return True
 
     def loop(self):
+        if self.result_collector is not None:self.result_collector.start()
+        annotator=getattr(self,'jev_annotator',None)
+        if annotator is not None:annotator.start()
+        try:self._loop()
+        finally:
+            if self.result_collector is not None:self.result_collector.close()
+            if annotator is not None:annotator.close()
+
+    def _loop(self):
         while not self.stop.is_set():
             progress=False
             for c in self.store.list('case'):

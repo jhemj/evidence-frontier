@@ -37,13 +37,16 @@ def resolved(pack):
     return result
 
 
-def comparison_cost(pack):
+def comparison_cost(pack,*,request_spec=None):
     """Like-for-like cost after every reversible sharing pass; never clipping."""
     from .review_context import model_view_breakdown
     value=deepcopy(pack)
-    try:fit(value,1)
-    except InputBudgetError:pass
-    return model_view_breakdown(value)
+    if request_spec is None:
+        try:fit(value,1)
+        except InputBudgetError:pass
+    # B1 measures the already fitted native request exactly as it will be
+    # compiled for dispatch, not an artificially maximally factored variant.
+    return model_view_breakdown(value,request_spec=request_spec)
 
 
 def references(output):
@@ -89,7 +92,7 @@ def span_rows(row):
         yield span['span_id'],item
 
 
-def start(store, cid, task, batch, canonical, maximum=36000):
+def start(store, cid, task, batch, canonical, maximum=36000,*,request_spec=None):
     """Commit all page memberships before any page is presented to a model."""
     existing = batch.get('review_stream_id')
     if existing:
@@ -100,7 +103,8 @@ def start(store, cid, task, batch, canonical, maximum=36000):
     # model context. The compiler preserves source identity and ownership.
     if maximum<=1200+FEEDBACK_LIMIT:
         raise ProjectionTooLarge('Measured model context leaves no source envelope after the stream and repair contracts')
-    pages = build_span_pages(canonical, maximum=maximum - 1200 - FEEDBACK_LIMIT, fit_fn=fit)
+    fit_fn=(lambda pack,limit:fit(pack,limit,request_spec=request_spec)) if request_spec is not None else fit
+    pages = build_span_pages(canonical, maximum=maximum - 1200 - FEEDBACK_LIMIT, fit_fn=fit_fn)
     span_catalog={sid:row for page in pages for observation in resolved(page)['observations']
                   for sid,row in span_rows(observation)}
     with store.tx():
@@ -113,7 +117,8 @@ def start(store, cid, task, batch, canonical, maximum=36000):
             generation=task.get('retry_generation', 0), round=batch['round'],
             version=VERSION, canonical=deepcopy(canonical),
             canonical_sha256=fingerprint(canonical), page_count=len(pages),
-            status='pages', maximum=maximum,feedback_reserve=FEEDBACK_LIMIT,source_span_catalog=span_catalog)
+            status='pages', maximum=maximum,feedback_reserve=FEEDBACK_LIMIT,source_span_catalog=span_catalog,
+            request_spec=deepcopy(request_spec))
         frontier=[]
         for index, page in enumerate(pages):
             node=store.add('review_page', cid, task_id=task['id'], batch_id=batch['id'],
@@ -296,7 +301,10 @@ def reduction_pack(stream, pages, final=True):
             'full page receipts remain in the canonical ledger.')}
     canonical['selection_is_partial'] = True
     canonical['finalization_allowed'] = final
-    fit(canonical, stream['maximum'] - stream.get('feedback_reserve',0))
+    try:
+        fit(canonical, stream['maximum'] - stream.get('feedback_reserve',0),request_spec=stream.get('request_spec'))
+    except InputBudgetError:
+        if not stream.get('_measurement_only'):raise
     return canonical
 
 
@@ -307,6 +315,8 @@ def _schedule_comparisons(store,cid,stream,pages):
     pathological irreducible source/contract floor cannot create an endless
     summarization loop. It remains an explicit input gap instead.
     """
+    if stream.get('request_spec'):
+        mandatory_floor(stream)
     groups=[];remaining=list(pages)
     while remaining:
         children=[remaining.pop(0)];best_pack=None
@@ -349,6 +359,23 @@ def _schedule_comparisons(store,cid,stream,pages):
                 covered_source_count=sum(c.get('covered_source_count',len(c['included_ids'])) for c in children))
             frontier.append(node['id'])
         store.update(stream['id'],frontier=frontier,level=stream.get('level',0)+1)
+
+
+def mandatory_floor(stream):
+    """Block before refocusing when obligations alone cannot fit.
+
+    This is a diagnostic lower bound, never a model input or a completed
+    judgment. Exact contrary originals, every supplied contract and unresolved
+    context remain. Only optional source memberships and child narratives are
+    removed to test the floor; the canonical ledger is not changed.
+    """
+    spec=stream.get('request_spec')
+    if spec is None:return None
+    # Reuse the canonical reduction's exact pinned-span / full-field rules.
+    # Empty children remove optional page narratives, not an objection, test
+    # predicate, source field or unresolved prior-assessment obligation.
+    floor=reduction_pack(stream,[],final=True)
+    return comparison_cost(floor,request_spec=spec)
 
 
 def prepare(store, cid, stream_id):
@@ -400,13 +427,14 @@ def prepare(store, cid, stream_id):
                     'counterevidence_ids':deepcopy(f.get('counterevidence_ids',[]))}
                     for f in previous.get('findings',[])]}
         if pending.get('focus_of'):
+            mandatory_floor(stream)
             pack['review_stream']['selection_budget_characters']=pending['focus_budget_chars']
             # Source selection alone cannot cure a growing derived notebook or
             # mandatory contract floor. Show measured old components, without
             # repeating the old assessment or clipping its unresolved context.
             previous_page=store.get(pending['focus_of'])
-            sizing=deepcopy(stream);sizing['maximum']=10**12
-            try:previous_cost=comparison_cost(reduction_pack(sizing,[previous_page],final=False))
+            sizing=deepcopy(stream);sizing['maximum']=10**12;sizing['_measurement_only']=True
+            try:previous_cost=comparison_cost(reduction_pack(sizing,[previous_page],final=False),request_spec=stream.get('request_spec'))
             except InputBudgetError:previous_cost=None
             pack['review_stream']['comparison_budget']={
                 'maximum_characters':stream['maximum']-stream.get('feedback_reserve',0),
@@ -435,7 +463,7 @@ def prepare(store, cid, stream_id):
                 'A partial search is inconclusive; its every matching row is not needed to establish that limit. '
                 'If essential contrary evidence cannot fit, disclose the limitation; never discard it for budget.')
         pack['finalization_allowed'] = False
-        fit(pack, stream['maximum'])
+        fit(pack, stream['maximum'],request_spec=stream.get('request_spec'))
         return pack, {'stream_id': stream_id, 'page_id': pending['id'], 'phase':pack['review_stream']['phase']}
     try:pack = reduction_pack(stream, pages)
     except InputBudgetError:
@@ -455,14 +483,22 @@ def focus_budget_errors(store,meta,pack,output,selected):
     before_cost=after_cost=None
     try:
         reduced=reduction_pack(stream,[candidate],final=False)
-        after_cost=comparison_cost(reduced);after=after_cost['transport_total']
+        after_cost=comparison_cost(reduced,request_spec=stream.get('request_spec'));after=after_cost['transport_total']
         if after>page['focus_budget_chars']:
             previous=store.get(page['focus_of'])
-            sizing=deepcopy(stream);sizing['maximum']=10**12
+            sizing=deepcopy(stream);sizing['maximum']=10**12;sizing['_measurement_only']=True
             before_pack=reduction_pack(sizing,[previous],final=False)
-            before_cost=comparison_cost(before_pack);before=before_cost['transport_total']
+            before_cost=comparison_cost(before_pack,request_spec=stream.get('request_spec'));before=before_cost['transport_total']
+            unit='characters'
+            if stream.get('request_spec'):
+                # A smaller source pack may still create a larger request once
+                # new notes/schema/template are included. Compare the exact
+                # same native envelope; these bytes are not exact token counts.
+                before=before_cost['request_budget']['request_utf8_bytes']
+                after=after_cost['request_budget']['request_utf8_bytes']
+                unit='UTF-8 bytes in the complete native request'
             if after>=before:
-                raise InputBudgetError(f'Source reselection made no measured progress: {before} -> {after} characters; target {page["focus_budget_chars"]}')
+                raise InputBudgetError(f'Source reselection made no measured progress: {before} -> {after} {unit}; pack planning target {page["focus_budget_chars"]} characters')
         # A strict reduction is not a final fit guarantee. Only one focus pass
         # is allowed for each frontier generation; subsequent real combination
         # still must fit, or remains an explicit input gap.
@@ -471,6 +507,7 @@ def focus_budget_errors(store,meta,pack,output,selected):
         return [{'code':'focus_selection_over_budget','maximum_characters':page['focus_budget_chars'],
                  'comparison_cost_before':before_cost,
                  'comparison_cost_after':after_cost,
+                 'compiled_budget_failure':deepcopy(getattr(exc,'metadata',None)),
                  'selected_source_sizes':[{'observation_id':o['id'],
                     'characters_before_shared_metadata':len(json.dumps(o,ensure_ascii=False,separators=(',',':')))}
                     for o in selected['observations'] if o['id'] in cited],

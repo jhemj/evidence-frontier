@@ -176,20 +176,23 @@ class Investigation:
                     model_calls=0, max_model_calls=max(6,min(30,int(os.getenv('INVESTIGATION_MODEL_CALLS','12')))), tool_calls=0, max_tool_calls=36, challenge_calls=0,
                     max_challenge_calls=10, review_calls=0, max_review_calls=5, domain_cursor=1,
                     plan_domain_batch_size=3, consecutive_plan_failures=0, started_at=now(), stop_reason=None)
+                initial=self.c.initial_discovery_plan(self.case_id,self.e,self.task,run['source_run'],
+                    [{'tool':'correlate','reason':'AI 선택과 관계없이 원문 연결 분석'}]+initial_checks)
+                calls=initial.pop('tool_calls')
                 self.s.add('investigation_plan', self.case_id, task_id=self.task['id'], run_id=run['id'], revision=0,
                     output={'summary':'필수 설정·실행 기록 대조', 'claims':[], 'hypotheses':[], 'remaining_questions':[],
-                            'tool_calls':[{'tool':'correlate','reason':'AI 선택과 관계없이 원문 연결 분석'}]+initial_checks},
-                    valid_ids=[], focus=[], assessed=False)
+                            'tool_calls':calls},valid_ids=[],focus=[],assessed=False,**initial)
         return {'run_id': run['id']}
 
     def run(self, state): return self.s.get(state['run_id'])
 
-    def model(self, question, pack, run, purpose):
+    def model(self, question, pack, run, purpose, *, compiled_request=None):
         from .runtime_contract import guard
         guard(self.c,self.case_id,self.task)
         configs = self.s.list('config'); config = configs[-1]['provider'] if configs else {}
         if not config.get('model'): raise ValueError('로컬 모델을 연결한 뒤 계속하세요.')
         if not self.c.model_lock.acquire(blocking=False): raise ValueError('다른 AI 요청이 끝난 뒤 계속하세요.')
+        request_attempt=None
         try:
             # Reserve before transmission. A crash never refunds this reservation.
             with self.s.tx():
@@ -200,10 +203,16 @@ class Investigation:
                     target='조사 영역 '+', '.join(str(h['number']) for h in pack.get('hypotheses',[]) if h.get('number')))
                 self.s.update(run['id'], model_calls=run['model_calls'] + 1)
             from . import model_availability
+            from .request_lifecycle import RequestAttempt,reference
+            request_attempt=RequestAttempt(self.s,self.case_id,self.task,role='investigator',
+                owner_records=[self.s.get(run['id'])],evidence_id=self.e['id'],
+                reservation_id=reservation['id'],logical_work_id=run['id']+':'+purpose+':'+str(run.get('domain_cursor',1)))
             try:
-                output, receipt = consult(config, question, pack, role='investigator', provider_factory=Provider)
+                output, receipt = request_attempt.consult(consult,config,question,pack,
+                    role='investigator',provider_factory=Provider,compiled_request=compiled_request)
                 model_availability.recovered(self.s,self.case_id,receipt.get('transport_identity'))
             except (httpx.TransportError,ValueError) as ex:
+                request_attempt.fail(ex,outcome='service_unavailable' if model_availability.unavailable(ex) else 'failed')
                 if model_availability.unavailable(ex):
                     with self.s.tx():
                         model_availability.defer(self.s,self.case_id,self.task,ex,reservation_id=reservation['id'])
@@ -218,20 +227,34 @@ class Investigation:
                     'domain_batch_size':batch_size,'consecutive_failures':failures,
                     'consecutive_failure_limit':MAX_CONSECUTIVE_PLAN_FAILURES}
                 metadata=getattr(ex,'metadata',{})
+                rejected=list(run.get('rejected_planner_material_bindings',[]))
+                if category=='input_budget':
+                    material=(pack.get('planner_input_projection') or {}).get('material_binding')
+                    if material and material not in rejected:rejected.append(material)
+                    recovery.update(action='reselect_compiled_input',automatic_same_input_retry=False,
+                        material_binding=material)
                 with self.s.tx():
                     self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='model_error',reservation_id=reservation['id'],error=str(ex),
                         failure_category=category,raw_output=getattr(ex,'raw_output',None),recovery=recovery,
-                        **{k:metadata[k] for k in ('usage','generation_settings','prompt_characters','elapsed_seconds') if k in metadata})
+                        **{k:metadata[k] for k in ('usage','generation_settings','prompt_characters','elapsed_seconds',
+                            'prompt_budget','compiled_request','request_attempted','delivery_state') if k in metadata})
                     self.s.update(reservation['id'],status='failed',error=str(ex))
-                    self.s.update(run['id'],consecutive_plan_failures=failures,plan_domain_batch_size=batch_size)
+                    self.s.update(run['id'],consecutive_plan_failures=failures,plan_domain_batch_size=batch_size,
+                        rejected_planner_material_bindings=rejected[-MAX_CONSECUTIVE_PLAN_FAILURES:])
                 return None
             with self.s.tx():
                 guard(self.c,self.case_id,self.task)
-                self.s.add('receipt', self.case_id, task_id=self.task['id'], evidence_id=self.e['id'], receipt_type='investigator_model', reservation_id=reservation['id'], **receipt)
+                request_attempt.emit('validating',validation_stage='proposal_transport_contract')
+                proposal_receipt=self.s.add('receipt', self.case_id, task_id=self.task['id'], evidence_id=self.e['id'], receipt_type='investigator_model', reservation_id=reservation['id'], **receipt)
                 self.s.update(reservation['id'], status='received', usage=receipt.get('usage'))
                 self.s.update(run['id'],consecutive_plan_failures=0)
+                request_attempt.emit('validated_output',accepted_refs=[reference(proposal_receipt)],adoption_scope='proposal_not_evidence')
+                request_attempt.finish('proposal_received')
             return output
-        finally: self.c.model_lock.release()
+        finally:
+            if request_attempt is not None and not request_attempt.ended:
+                request_attempt.finish('controller_exit_without_adoption')
+            self.c.model_lock.release()
 
     def plan(self, state):
         run = self.run(state); revision = len(self.records('investigation_plan'))
@@ -313,6 +336,8 @@ class Investigation:
         pack['question_memory']=question_context
         from .test_admission import catalog
         pack['tool_capabilities']=catalog(pack.get('target_os','linux'))
+        from .test_context_projection import attach as attach_test_context, fit_presented
+        attach_test_context(pack,self.s,self.case_id,self.task,self.e,run['source_run'])
         pack['coverage_checklist']=[{'number':h['number'],'question':h['text'],
             'presented_for_planning':h['number'] in seen_domains} for h in domain_rows]
         pack['completed_tools']=[{'id':j['id'],'request':tool_scope(j['request']),
@@ -332,36 +357,14 @@ class Investigation:
                 instruction=('Rejected truncated output is not evidence. Start a fresh complete JSON response, not a continuation. '
                              'The response exceeded the generation budget, not necessarily the input context. '
                              'Process only the current focus; other domains remain pending. Use concise fields and do not repeat evidence or prose.')
-            pack['output_validation_feedback']={'error':failures[-1]['error'][:2000],
-                'category':category,'instruction':instruction}
+            if category!='input_budget':
+                pack['output_validation_feedback']={'error':failures[-1]['error'][:2000],
+                    'category':category,'instruction':instruction}
         compact=run.get('plan_domain_batch_size',3)==1
         if compact:
             pack['response_budget_guidance']={'mode':'partition_and_compact','focus':focus,
                 'scope':'This limits one response, not the total number of hypotheses. Unprocessed domains and further questions remain pending.',
                 'instruction':'Use short title/card_summary/change_reason/reasoning without duplicating the same prose. Preserve essential qualifiers and exact source IDs.'}
-        # fit() may reject a real large source after its lossless compaction
-        # passes. Remove only ordinary candidates, one at a time, and retry;
-        # promoted result IDs remain in the pack. Each retry rebuilds the
-        # selection audit so counts and family omissions remain truthful.
-        from copy import deepcopy
-        while True:
-            candidate = deepcopy(pack)
-            try:
-                fit(candidate)
-                pack = candidate
-                break
-            except ValueError as ex:
-                remove_at = next((i for i in range(len(pack['observations']) - 1, -1, -1)
-                                  if pack['observations'][i].get('id') not in protected_priority_ids), None)
-                if remove_at is None:
-                    raise
-                pack['observations'].pop(remove_at)
-                pack['included_observations'] = len(pack['observations'])
-                reasons = {row.get('id'): row.get('reason', 'baseline_rank')
-                           for row in pack.get('selection_audit', {}).get('selected', [])}
-                pack['selection_audit'] = selection_audit(
-                    scoped_observations, pack['observations'], reasons,
-                    coverage, presented, 'guided')
         question = ('question_memory의 미해결 질문·반론·새 검사 결과를 우선 검토하세요. 중요한 설명과 정상 운영 대안을 구별할 다음 검사를 선택하세요. '
                     f'조사 범위 누락 점검용 영역은 {focus}입니다. 영역 수를 채우려고 가설을 만들지 마세요. '
                     '최소한 사건 핵심 질문과 가장 타당한 경쟁 설명을 검토하되, 자료가 부족하면 열린 질문으로 남기세요. '
@@ -377,8 +380,53 @@ class Investigation:
             question += (' 이번 호출은 마지막 결과 통합입니다. tool_calls는 반드시 빈 배열로 두세요. '
                          '가장 최근 실제 검사 결과를 반영하고 이전 설명의 미확인 사항 중 해소된 내용을 정정하세요. '
                          '남은 검사는 remaining_questions에 남기고 완료한 것으로 표현하지 마세요.')
+        # Fit the complete prompt AFTER its final question is known. V2 uses
+        # exact compiler accounting, including schema and output reserve; no
+        # evidence-body truncation is introduced by this convergence step.
+        from .explanation_links import available_claims
+        def claims(candidate):
+            return available_claims(self.s,self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],
+                generation=self.task.get('retry_generation',0),valid_ids=[o['id'] for o in candidate.get('observations',[])])
+        def audit(candidate):
+            reasons={row.get('id'):row.get('reason','baseline_rank')
+                for row in candidate.get('selection_audit',{}).get('selected',[])}
+            return selection_audit(scoped_observations,candidate['observations'],reasons,coverage,presented,'guided')
+        compiled=None
+        from .test_context_projection import enabled
+        if enabled(self.task):
+            from .planner_input import fit_planner_input,PlannerInputBlocked
+            configs=self.s.list('config');config=configs[-1]['provider'] if configs else {}
+            try:
+                pack,compiled=fit_planner_input(pack,config,question,
+                    rebind=lambda candidate:attach_test_context(candidate,self.s,self.case_id,self.task,self.e,run['source_run']),
+                    audit=audit,claims=claims,protected_ids=protected_priority_ids,
+                    rejected_material_bindings=run.get('rejected_planner_material_bindings',[]))
+            except PlannerInputBlocked as ex:
+                self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],
+                    generation=self.task.get('retry_generation',0),receipt_type='planner_input_blocked',
+                    error=str(ex),**ex.metadata)
+                self.s.update(run['id'],stop_reason='planner_input_projection_blocked')
+                raise
+        else:
+            # Preserve the legacy candidate/compaction policy.
+            from copy import deepcopy
+            while True:
+                candidate=deepcopy(pack);candidate['accepted_claim_refs']=claims(candidate)
+                try:
+                    fit_presented(candidate,fit,self.s,self.case_id,self.task,self.e,run['source_run'])
+                    pack=candidate;break
+                except ValueError:
+                    remove_at=next((i for i in range(len(pack['observations'])-1,-1,-1)
+                        if pack['observations'][i].get('id') not in protected_priority_ids),None)
+                    if remove_at is None:raise
+                    pack['observations'].pop(remove_at);pack['included_observations']=len(pack['observations'])
+                    pack['selection_audit']=audit(pack)
         self.s.update(self.case_id, investigation_stage='로컬 AI · 미해결 질문과 다음 검사', investigation_round=revision + 1)
-        output = self.model(question, pack, run, 'plan')
+        import inspect
+        parameters=inspect.signature(self.model).parameters
+        compiled_kwargs={'compiled_request':compiled} if compiled is not None and (
+            'compiled_request' in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())) else {}
+        output = self.model(question, pack, run, 'plan',**compiled_kwargs)
         if output is None:return {'route':'plan'}
         if final_synthesis:
             # Keep the final model reservation for interpretation of completed work.
@@ -388,8 +436,11 @@ class Investigation:
         with self.s.tx():
             plan = self.s.add('investigation_plan', self.case_id, task_id=self.task['id'], run_id=run['id'],
                 revision=revision, generation=self.task.get('retry_generation',0), output=output, valid_ids=[o['id'] for o in pack['observations']], focus=focus, assessed=False,
-                selection_audit=pack.get('selection_audit',{}))
-            self.s.update(plan['id'],question_context=question_context)
+                selection_audit=pack.get('selection_audit',{}),accepted_claim_refs=pack.get('accepted_claim_refs',[]))
+            self.s.update(plan['id'],question_context=question_context,
+                test_contract_context=pack.get('test_contract_context'),
+                **({'planner_input_projection':pack['planner_input_projection']}
+                   if 'planner_input_projection' in pack else {}))
             self.s.update(run['id'], domain_cursor=min(11,1+len(seen_domains|set(focus))))
             self.s.add('message', self.case_id, role='assistant', text=output['summary'], mode='ai_candidate', partial=True, automatic=True)
         return {'plan_id': plan['id'], 'route': 'dispatch'}
@@ -409,12 +460,31 @@ class Investigation:
                     error='현재 범위를 벗어난 질문 참조',request=proposal)
                 continue
             q=q or (questions[0] if questions else {'question_key':self.task['id']+':'+purpose,'version':0})
-            intent=question_engine.reserve(self.s,self.case_id,self.task,q,proposal,self.e,run['source_run'])
+            source = self.s.get(state['plan_id']) if purpose=='exploration' and state.get('plan_id') else {}
+            if self.task.get('test_contract_policy')=='purpose-outcomes-v2' and purpose=='challenge' and not proposal.get('test_design'):
+                if not q.get('id'):continue
+                from .test_contract_v2 import controller_collection
+                proposal,source=controller_collection(self.s,self.case_id,self.task,self.e,run['source_run'],proposal,q)
+            intent=question_engine.reserve(self.s,self.case_id,self.task,q,proposal,self.e,run['source_run'],
+                accepted_claim_refs=source.get('accepted_claim_refs',[]),source_record_id=source.get('id'))
             if not intent['admission']['eligible']:continue
             from .test_admission import reusable,bind_reuse,execution_fingerprint
             key=execution_fingerprint(self.records('investigation_job'),key)
             old=reusable(self.records('investigation_job'),key,proposal,source_run=run['source_run'],evidence_id=self.e['id'])
             if old:
+                if proposal.get('test_design',{}).get('version')==2 and old['status']=='ingested':
+                    from .review_contracts import contracts,contract,attach
+                    from .test_contract_v2 import bind_existing_result
+                    parents=contracts(old)
+                    if contract(proposal) not in parents:
+                        if not parents:continue
+                        parent=next((p for p in parents if p['dossier_id']==proposal['test_design']['owner_ref']['id']),parents[0])
+                        proposal,binding=bind_existing_result(self.s,self.case_id,self.task,self.e,run['source_run'],
+                            proposal,intent,old,source.get('id'),parent_contract=parent)
+                        intent=question_engine.reserve(self.s,self.case_id,self.task,q,proposal,self.e,run['source_run'],
+                            source_record_id=binding['id'])
+                        if not intent['admission']['eligible']:continue
+                        old=self.s.update(old['id'],contracts=attach(old,proposal))
                 bind_reuse(self.s,self.case_id,old,intent)
                 old=self.s.update(old['id'],test_intent_ids=list(dict.fromkeys(old.get('test_intent_ids',[])+[intent['id']])),
                     claim_ids=list(dict.fromkeys(old.get('claim_ids',[])+([claim_id] if claim_id else []))))
@@ -428,11 +498,15 @@ class Investigation:
             with self.s.tx():
                 # The controller serializes job admission and pause under this lock.
                 if self.s.get(self.case_id)['status'] != 'running': return
+                contract_values={}
+                if proposal.get('test_design',{}).get('version')==2:
+                    from .review_contracts import contract
+                    contract_values={'contracts':[contract(proposal)]}
                 self.s.add('investigation_job', self.case_id, task_id=self.task['id'], run_id=run['id'],
                     source_run=run['source_run'],
                     evidence_id=self.e['id'],generation=self.task.get('retry_generation',0),
                     plan_id=state.get('plan_id'), fingerprint=key, request=call, purpose=purpose, status='admitted',
-                    test_intent_ids=[intent['id']],claim_ids=[claim_id] if claim_id else [])
+                    test_intent_ids=[intent['id']],claim_ids=[claim_id] if claim_id else [],**contract_values)
                 self.s.update(run['id'], **{budget_key: run[budget_key] + 1})
 
     def dispatch(self, state):
@@ -449,14 +523,21 @@ class Investigation:
         if not job.get('dispatched_at'):self.s.update(job['id'],dispatched_at=now())
         try:
             worker_request('POST', '/jobs', json=body, timeout=20)
-            self.s.update(job['id'], status='submitted')
         except httpx.TransportError:
             # Delivery may have happened. Re-submit the SAME identity only.
-            self.s.update(job['id'], status='submitted')
+            pass
+        with self.s.tx():
+            fresh=self.s.get(job['id'])
+            if fresh.get('status')!='ingested' and not fresh.get('collector_terminal_receipt_id'):
+                self.s.update(job['id'], status='submitted')
         return {'job_id': job['id'], 'route': 'await_jobs'}
 
     def await_jobs(self, state):
         job = self.s.get(state['job_id'])
+        if job['status']=='ingested':return {'route':'dispatch'}
+        collector=getattr(self.c,'result_collector',None)
+        if collector is not None and collector.enabled and job.get('collector_terminal_receipt_id'):
+            return {'route':'await_jobs'}
         try: reply = worker_request('GET', '/jobs/' + job['fingerprint'], timeout=20)
         except httpx.TransportError: return {'route': 'await_jobs'}
         except httpx.HTTPStatusError as ex:
@@ -465,16 +546,28 @@ class Investigation:
         if reply['status'] in ('queued','running'):
             if job.get('worker_status')!=reply['status']:self.s.update(job['id'],worker_status=reply['status'])
             return {'route': 'await_jobs'}
+        if collector is not None and collector.enabled:
+            collector.ingest_status(job,reply)
+            return {'route':'dispatch' if self.s.get(job['id'])['status']=='ingested' else 'await_jobs'}
         if reply['status'] == 'execution_unknown': raise ExecutionUnknown('작업 실행 여부가 불명확합니다. 이전 실행을 확인할 때까지 재실행하지 않습니다.')
         result = reply.get('result', {'status':'failed','observations':[], 'error':reply.get('error')})
         if reply.get('result') and digest(result) != reply['result_sha256']: raise ValueError('작업 결과 해시 불일치')
-        self.s.update(job['id'], status='received', result=result,ended_at=now(),result_status=result['status'],error=result.get('error'))
+        with self.s.tx():
+            if self.s.get(job['id'])['status']=='ingested':return {'route':'dispatch'}
+            self.s.update(job['id'], status='received', result=result,ended_at=now(),result_status=result['status'],error=result.get('error'))
         return {'route': 'ingest_validate'}
 
     def ingest_validate(self, state):
         job = self.s.get(state['job_id'])
+        collector=getattr(self.c,'result_collector',None)
+        if collector is not None and collector.enabled and job['status']!='ingested':
+            # A saved legacy result without the worker envelope must be
+            # reconciled by the collector, never adopted on missing proof.
+            return {'route':'await_jobs'}
         if job['status'] != 'ingested':
             with self.s.tx():
+                job=self.s.get(job['id'])
+                if job['status']=='ingested':return {'route':'dispatch'}
                 ids = store_tool_result(self.c, self.case_id, self.e, self.task, job['result'], job['request'])
                 self.s.update(job['id'], status='ingested', observation_ids=ids, result_status=job['result']['status'], result_scope={k:v for k,v in job['result'].items() if k!='observations'}, result=None)
                 from .question_engine import finish_intents
@@ -581,6 +674,7 @@ class Investigation:
             if failures:pack['output_validation_feedback']={'error':failures[-1]['error'][:1600],
                 'instruction':'Rejected output is not evidence. Return only alternatives, contradicting_observation_ids, missing_checks as defined by Falsification.'}
             if not self.c.model_lock.acquire(blocking=False):raise ValueError('로컬 AI 응답 대기')
+            request_attempt=None
             try:
                 from .runtime_contract import guard
                 with self.s.tx():
@@ -602,10 +696,16 @@ class Investigation:
                     '\n반증 검토의 contradicting_observation_ids에는 아래 허용 목록의 ID만 정확히 복사하세요. '
                     '목록 밖 ID는 사용하지 마세요: '+', '.join(allowed_ids))
                 from . import model_availability
+                from .request_lifecycle import RequestAttempt
+                request_attempt=RequestAttempt(self.s,self.case_id,self.task,role='falsifier',
+                    input_record=input_record,owner_records=[claim],evidence_id=self.e['id'],
+                    reservation_id=reservation['id'],logical_work_id=claim['id']+':falsifier')
                 try:
-                    review,receipt=consult(config,question,pack,role='falsifier',provider_factory=Provider)
+                    review,receipt=request_attempt.consult(consult,config,question,pack,
+                        role='falsifier',provider_factory=Provider)
                     model_availability.recovered(self.s,self.case_id,receipt.get('transport_identity'))
                 except (httpx.TransportError,ValueError) as ex:
+                    request_attempt.fail(ex,outcome='service_unavailable' if model_availability.unavailable(ex) else 'failed')
                     if model_availability.unavailable(ex):
                         with self.s.tx():
                             model_availability.defer(self.s,self.case_id,self.task,ex,reservation_id=reservation['id'],input_record_id=input_record['id'])
@@ -614,6 +714,7 @@ class Investigation:
                     self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='model_error',claim_id=claim['id'],reservation_id=reservation['id'],input_record_id=input_record['id'],error=str(ex))
                     self.s.update(reservation['id'],status='failed',error=str(ex),ended_at=now())
                     return {}
+                request_attempt.emit('validating',validation_stage='falsifier_source_scope')
                 invalid=sorted(set(review['contradicting_observation_ids'])-set(allowed_ids))
                 if invalid:
                     # Never silently delete a citation: retain the rejected model
@@ -621,15 +722,20 @@ class Investigation:
                     error='반증 검토가 허용 목록에 없는 근거를 참조함: '+', '.join(invalid[:20])
                     self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='model_error',claim_id=claim['id'],reservation_id=reservation['id'],input_record_id=input_record['id'],failure_category='citation_contract',error=error,rejected_observation_ids=invalid)
                     self.s.update(reservation['id'],status='failed',error=error,ended_at=now())
+                    request_attempt.fail(ValueError('citation_contract'))
                     return {}
                 with self.s.tx():
                     guard(self.c,self.case_id,self.task)
                     validate_scope(self.c,claim,pack)
-                    self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='automatic_falsifier',claim_id=claim['id'],reservation_id=reservation['id'],input_record_id=input_record['id'],**receipt)
+                    accepted_receipt=self.s.add('receipt',self.case_id,task_id=self.task['id'],evidence_id=self.e['id'],receipt_type='automatic_falsifier',claim_id=claim['id'],reservation_id=reservation['id'],input_record_id=input_record['id'],**receipt)
                     self.s.update(reservation['id'],status='received',ended_at=now())
                     self.s.update(claim['id'],falsification=review,challenge_status='reviewed_with_limits',
                         actual_check_ids=[j['id'] for j in bound_jobs(claim,jobs)],review_type='실제 도구 대조 후 로컬 AI 경쟁 설명 검토 · 독립 해석 검증 아님')
-            finally:self.c.model_lock.release()
+                    request_attempt.accept([accepted_receipt,self.s.get(claim['id'])],scope='validated_falsifier_review')
+            finally:
+                if request_attempt is not None and not request_attempt.ended:
+                    request_attempt.finish('controller_exit_without_adoption')
+                self.c.model_lock.release()
         return {}
 
     def stop_gate(self, state):

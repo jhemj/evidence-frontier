@@ -39,6 +39,10 @@ class WorkerJobs:
         self.db = sqlite3.connect(self.root / 'jobs.sqlite3', check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, request TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, updated_at TEXT NOT NULL, error TEXT); CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, owner TEXT NOT NULL, started_at TEXT NOT NULL);')
+        # Older attempts remain explicitly unverified; a restart must not give
+        # an old failed attempt the identity of the newly loaded worker.
+        if 'runtime_code' not in {r[1] for r in self.db.execute('PRAGMA table_info(attempts)')}:
+            self.db.execute('ALTER TABLE attempts ADD COLUMN runtime_code TEXT')
         self.owner = f'{os.getenv("HOSTNAME", "local")}:{os.getpid()}:{uuid4().hex}'
         self.db.execute('CREATE TABLE IF NOT EXISTS active_attempts (job_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL)')
         # A vanished HTTP process is not proof that its child tool stopped.
@@ -74,15 +78,30 @@ class WorkerJobs:
         return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def status(self, identity):
-        with self.lock: row = self.db.execute('SELECT * FROM jobs WHERE id=?', (identity,)).fetchone()
+        with self.lock:
+            row = self.db.execute('SELECT * FROM jobs WHERE id=?', (identity,)).fetchone()
+            attempt = self.db.execute('SELECT a.id,a.runtime_code FROM active_attempts x JOIN attempts a ON a.id=x.attempt_id AND a.job_id=x.job_id WHERE x.job_id=?', (identity,)).fetchone()
         if not row: raise ValueError('작업을 찾지 못했습니다.')
         state = {k: row[k] for k in ('id', 'status', 'attempts', 'updated_at', 'error')}
+        request_sha = hashlib.sha256(row['request'].encode()).hexdigest()
+        request = json.loads(row['request'])
+        state.update(version='worker-job-status-2', request_sha256=request_sha,
+                     attempt_id=attempt['id'] if attempt else None,
+                     runtime_code=attempt['runtime_code'] if attempt else None,
+                     source_run=(request.get('investigation') or {}).get('run_id'))
         output = self.root / (identity + '.json')
         if row['status'] == 'succeeded':
             envelope = json.loads(output.read_bytes())
             if envelope.get('runtime_code')!=self.runtime_code:raise ValueError('실행 조합이 다른 worker 결과 재사용 차단')
+            if envelope.get('request_sha256') != request_sha:raise ValueError('작업 요청 해시 불일치')
+            if not attempt or envelope.get('attempt_id') != attempt['id']:raise ValueError('작업 실행 attempt 불일치')
+            if attempt['runtime_code'] and attempt['runtime_code'] != envelope.get('runtime_code'):raise ValueError('작업 실행 조합 불일치')
             if envelope['result_sha256'] != self.digest(envelope['result']): raise ValueError('작업 결과 해시 불일치')
-            state.update(result=envelope['result'], result_sha256=envelope['result_sha256'])
+            state.update(result=envelope['result'], result_sha256=envelope['result_sha256'],
+                         runtime_code=envelope['runtime_code'])
+        # Covers terminal failure as well as success. This is an integrity
+        # version within the trusted worker boundary, not a signature.
+        state['status_sha256'] = self.digest(state)
         return state
 
     def progress(self, identity):
@@ -98,7 +117,7 @@ class WorkerJobs:
                     attempt_id = uuid4().hex
                     self.db.execute('BEGIN IMMEDIATE')
                     self.db.execute("UPDATE jobs SET status='running',attempts=attempts+1,updated_at=? WHERE id=?", (now(), row['id']))
-                    self.db.execute('INSERT INTO attempts VALUES (?,?,?,?)', (attempt_id, row['id'], self.owner, now()))
+                    self.db.execute('INSERT INTO attempts (id,job_id,owner,started_at,runtime_code) VALUES (?,?,?,?,?)', (attempt_id, row['id'], self.owner, now(), self.runtime_code))
                     self.db.execute('INSERT OR REPLACE INTO active_attempts VALUES (?,?)', (row['id'],attempt_id))
                     self.db.execute('COMMIT')
             if not row:

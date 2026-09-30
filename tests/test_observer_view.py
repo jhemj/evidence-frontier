@@ -231,7 +231,10 @@ const test=id=>({type:'test',id,key:'test:'+id,question_id:'Q'+id,version:'v'+id
   design:{expected_update:'A supplied expected change.',required_observation_ids:['O1']},assessment_status:'unassessed',result_scope:{complete:false}});
 const question=id=>({type:'question',id:'Q'+id,key:'question:Q'+id,hypothesis_keys:['hypothesis:'+id],test_keys:['test:'+id]});
 const a=hypothesis('A'),c=hypothesis('B'),x=test('A'),y=test('B'),qa=question('A'),qb=question('B');
-const view={case:{},objects:Object.fromEntries([a,c,x,y,qa,qb].map(o=>[o.key,o]))};
+const relation=(from,to,kind)=>({from:from.key,to:to.key,kind,target_scope:{task_id:'T',evidence_id:'E',generation:0},
+  from_ref:{key:from.key,version:from.version},to_ref:{key:to.key,version:to.version}});
+const view={case:{},objects:Object.fromEntries([a,c,x,y,qa,qb].map(o=>[o.key,o])),
+  relations:[relation(x,a,'discriminates'),relation(y,c,'discriminates')]};
 const activity={items:[{id:'JA',state:'running',title:'A',purpose:'Actual job purpose.'}]};
 const saved=JSON.stringify([view,activity]);
 let ctx=b.context({view,current:view,activity,available:true,selectedKey:null});
@@ -252,18 +255,19 @@ ctx=b.context({view,current:view,activity,available:true,pinned:true});assert.eq
 ctx=b.context({view,current:view,activity,available:false});assert.equal(ctx.real,null);assert.equal(ctx.hypotheses.length,0);
 a.assessment_current=false;ctx=b.context({view,current:view,activity,available:true});assert.equal(ctx.active,undefined);
 const missing=hypothesis('unlinked');assert.equal(b.linkedTests(missing,view).length,0);
-const unrelated={...x,key:'test:OTHER',design:{required_observation_ids:['other-file']}};
+const unrelated={...x,key:'test:OTHER',design:{required_observation_ids:['O1']}};
 const wideQuestion={...qa,test_keys:[x.key,unrelated.key]};
 const wideView={...view,objects:{...view.objects,[qa.key]:wideQuestion,[unrelated.key]:unrelated}};
 assert.deepEqual(b.linkedTests(a,wideView).map(t=>t.key),[x.key]);
 assert.equal(b.testExplanation(null).outcomes.length,0);
 assert.equal(b.testExplanation({...x,conditions:{}}).outcomes.length,0);
-const claim={type:'claim',key:'claim:C',validity:'adopted',source_keys:['observation:O1'],
+const claim={type:'claim',key:'claim:C',version:'v-C',validity:'adopted',source_keys:['observation:O1'],
   title:'Malware definitely executed by a person.',interpretation:'An invented product identity.',
   display_binding:{status:'bound',fact:{pointer:'/fields/command',value:'<img src="https://invalid.example">'}}};
 assert.equal(b.factText(claim),'기록에 명령 문자열 ‘<img src="https://invalid.example">’가 남아 있어요.');
 assert.equal(b.factText(claim).includes('definitely'),false);
-assert.equal(b.claimFor(a,{objects:{[claim.key]:claim}}),claim);
+assert.equal(b.claimFor(a,{objects:{[claim.key]:claim,[a.key]:a},relations:[relation(claim,a,'explains')]}),claim);
+assert.equal(b.claimFor(a,{objects:{[claim.key]:claim,[a.key]:a},relations:[]}),null);
 assert.equal(b.claimFor(missing,{objects:{[claim.key]:{...claim,source_keys:['observation:OTHER']}}}),null);
 '''
     result=subprocess.run([NODE,'-e',script,str(ROOT/'ui/observer/briefing.js')],capture_output=True,text=True,timeout=15)

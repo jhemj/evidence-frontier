@@ -22,7 +22,11 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
     data=Path(data_root or os.getenv('DATA_ROOT',ROOT/'data'))
     evidence=Path(evidence_root or os.getenv('EVIDENCE_ROOT',ROOT/'examples'))
     reports=data/'reports'
-    store=Store(data/'case.sqlite3');controller=Controller(store,evidence)
+    store=Store(data/'case.sqlite3');controller=Controller(store,evidence,
+        result_collector_enabled=os.getenv('FRONTIER_RESULT_COLLECTOR','0')=='1')
+    if os.getenv('FRONTIER_JEV_ANNOTATOR'):
+        from .decision_runtime import JevAnnotator
+        controller.jev_annotator=JevAnnotator(controller,**json.loads(os.environ['FRONTIER_JEV_ANNOTATOR']))
     @asynccontextmanager
     async def lifespan(app):
         controller.recover()
@@ -33,7 +37,7 @@ def create_app(data_root=None,evidence_root=None,start_worker=True):
         controller.stop.set();controller.wake.set()
         if thread:thread.join(timeout=2)
 
-    app=FastAPI(title='Evidence Frontier',version='0.1.0',lifespan=lifespan)
+    app=FastAPI(title='forsic',version='0.1.0',lifespan=lifespan)
     app.state.controller=controller
     app.add_middleware(TrustedHostMiddleware,allowed_hosts=['localhost','127.0.0.1','[::1]','testserver','workbench']+os.getenv('ALLOWED_HOSTS','').split(','))
 

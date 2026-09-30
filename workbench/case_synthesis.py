@@ -5,6 +5,7 @@ unbounded case memory as if it were evidence. Failure is a visible unknown.
 """
 import httpx
 from copy import deepcopy
+from contextlib import nullcontext
 from .investigation import compact_observation, ranked
 from .provider import Provider
 from .investigator import consult
@@ -140,6 +141,9 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
     from .test_admission import catalog
     pack['tool_capabilities']=catalog(pack['target_os'])
     pack['question_context']=question_engine.view(question_engine.refresh(controller,cid,evidence,task))
+    from .test_context_projection import attach as attach_test_context, fit_presented, source_run_id
+    test_source_run=source_run_id(obs.values())
+    attach_test_context(pack,store,cid,task,evidence,test_source_run)
     from .semantic_contract import source_facts
     pack['literal_fact_candidates']=source_facts([obs[i] for i in ids])
     overall_scope=deepcopy(pack['scope'])
@@ -151,7 +155,7 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
             pack['validation_feedback']=repair_feedback(ValueError(last.get('error','')),
                 last['validation_errors'],last['id'])
     current_feedback=deepcopy(pack.get('validation_feedback'))
-    finding=None;status='reviewed';metadata={};issues=[];output={};stream_meta=None
+    finding=None;status='reviewed';metadata={};issues=[];output={};stream_meta=None;request_attempt=None
     from . import review_stream
     source_ids=list(ids)
     origins={_object(obs[i]) for i in source_ids}-{None}
@@ -176,21 +180,28 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
         source_revision=dependency,checkpoint_revision=checkpoint_revision,source_ids=source_ids,status='pending')
     pack['final_pass']=model_exhausted(model_attempts(store,cid,task)+3,task.get('repair_generation')==generation)
     input_error=None
+    from .request_compiler import request_spec,compile_spec,REVIEW_QUESTIONS
+    provider_config=store.list('config')[-1]['provider']
+    review_question=REVIEW_QUESTIONS['synthesis']
+    spec=request_spec(provider_config,review_question,'synthesis')
     input_maximum=checkpoint.get('review_input_maximum',36000)
     try:
         if checkpoint.get('review_stream_id'):
             pack,stream_meta=review_stream.prepare(store,cid,checkpoint['review_stream_id'])
         else:
             canonical=deepcopy(pack)
-            try:fit(pack,input_maximum)
+            try:fit_presented(pack,fit,store,cid,task,evidence,test_source_run,input_maximum,request_spec=spec)
             except ValueError:
-                stream=review_stream.start(store,cid,task,checkpoint,canonical,maximum=input_maximum)
+                stream=review_stream.start(store,cid,task,checkpoint,canonical,maximum=input_maximum,request_spec=spec)
                 pack,stream_meta=review_stream.prepare(store,cid,stream['id'])
         if current_feedback:
             pack['validation_feedback']=current_feedback
-            fit(pack)
+            fit_presented(pack,fit,store,cid,task,evidence,test_source_run,request_spec=spec)
+        if stream_meta:
+            fit_presented(pack,fit,store,cid,task,evidence,test_source_run,input_maximum,request_spec=spec)
         validation_pack=review_stream.resolved(pack)
         ids=[o['id'] for o in validation_pack['observations']]
+        compiled_request=compile_spec(spec,pack).assert_fits()
     except ValueError as ex:input_error=str(ex)
     exhausted=model_exhausted(model_attempts(store,cid,task),task.get('repair_generation')==generation)
     if not ids or checkpoint['attempts']>=2 or exhausted or input_error:
@@ -208,14 +219,19 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
                 if model_exhausted(model_attempts(store,cid,task),task.get('repair_generation')==generation):return False
                 from .evidence_spans import manifest
                 reservation=store.add('synthesis_input',cid,task_id=task['id'],generation=generation,hypothesis_id=h['id'],pack=pack,
-                    evidence_presentation=manifest(pack),activity_target=h['text'][:300])
+                    evidence_presentation=manifest(pack),activity_target=h['text'][:300],compiled_request=compiled_request.identity)
                 store.update(checkpoint['id'],attempts=checkpoint['attempts']+1)
             store.update(cid,investigation_stage=f"사건 전체 가설 종합 {len(done)+1}/{len(hypotheses)}")
+            from .request_lifecycle import RequestAttempt
+            request_attempt=RequestAttempt(store,cid,task,role='synthesis',input_record=reservation,
+                owner_records=[h],evidence_id=evidence['id'],reservation_id=reservation['id'],
+                logical_work_id=checkpoint['id']+':'+review_stream.fingerprint(stream_meta))
             output=None
             try:
-                output,metadata=consult(store.list('config')[-1]['provider'],
-                    '현재 질문을 원문과 경쟁 설명에 대조하세요. 필요하면 판별 가능한 다음 검사를 제안하고, 가설을 사실로 전제하지 마세요. 분할 페이지는 중간 검토입니다.',pack,role='synthesis',provider_factory=Provider)
+                output,metadata=request_attempt.consult(consult,provider_config,
+                    review_question,pack,role='synthesis',provider_factory=Provider,compiled_request=compiled_request)
                 model_availability.recovered(store,cid,metadata.get('transport_identity'))
+                request_attempt.emit('validating',validation_stage='synthesis_source_and_scope')
                 presented={o['id']:o for o in validation_pack['observations']}
                 issues=errors(output,[h['id']],ids,{h['id']:ids},presented,
                     require_literals=task.get('review_policy')=='autonomous-v1',canonical_observations=obs)
@@ -247,6 +263,7 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
                     output['findings']=[bind(f,presented) for f in output['findings']]
                 finding=output['findings'][0]
             except (ValueError,httpx.TransportError) as ex:
+                request_attempt.fail(ex,outcome='service_unavailable' if model_availability.unavailable(ex) else 'failed')
                 if model_availability.unavailable(ex):
                     with store.tx():
                         model_availability.defer(store,cid,task,ex,input_record_id=reservation['id'])
@@ -264,27 +281,40 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
                         review_stream_id=None,attempts=0)
                 return False
             guard(controller,cid,task)
-            if store.get(task['id']).get('retry_generation',0)!=generation:return False
+            if store.get(task['id']).get('retry_generation',0)!=generation:
+                request_attempt.emit('rejected',failure_category='stale_task_generation')
+                request_attempt.finish('stale_scope')
+                return False
             metadata['input_record_id']=reservation['id']
             if stream_meta and stream_meta['phase']!='synthesis':
                 with store.tx():
                     if not sources_current():
                         store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],receipt_type='synthesis_error',
                             failure_category='stale_scope',error='분할 검토 중 원문 범위 변경. 채택 거부.',rejected_output=output,**metadata)
+                        request_attempt.emit('rejected',failure_category='stale_synthesis_scope')
+                        request_attempt.finish('stale_scope')
                         return False
                     receipt=store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],
                         receipt_type='case_synthesis_page',generation=generation,**metadata)
                     discovered=objection_ledger.capture(store,cid,task,output,receipt['id'],manifest(selected_pack))
                     review_stream.accept_page(store,checkpoint,stream_meta,output,receipt['id'],ids,discovered,presented_pack=pack)
+                    request_attempt.accept([receipt],phase='page_accepted',scope='intermediate_page_not_final_judgment')
                 return False
+        except BaseException as ex:
+            if request_attempt is not None and not request_attempt.ended:
+                request_attempt.fail(ex,outcome='controller_exception')
+            raise
         finally:controller.model_lock.release()
-    with store.tx():
+    with (request_attempt.finalizing() if request_attempt is not None else nullcontext()), store.tx():
         from .runtime_contract import guard
         guard(controller,cid,task)
         if (not sources_current()
             or any(r['hypothesis_id']==h['id'] and r.get('checkpoint_revision')==checkpoint_revision for r in current(controller,cid,task))):
             store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],receipt_type='synthesis_error',
                 failure_category='stale_scope',error='종합 중 증거·작업 범위 변경. 결과 채택 거부.',rejected_output=finding,**metadata)
+            if status=='reviewed':
+                request_attempt.emit('rejected',failure_category='stale_synthesis_scope')
+                request_attempt.finish('stale_scope')
             return False
         if status=='reviewed':
             assessment=store.add('receipt',cid,task_id=task['id'],evidence_id=evidence['id'],
@@ -300,7 +330,8 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
             if status=='reviewed':status='objections_open'
         from .claim_scope import qualify as qualify_scope
         finding=qualify_scope(finding,obs)
-        followup_id=admit_checks(controller,cid,evidence,task,h,output.get('next_checks',[]),source_ids,followups) if status in ('reviewed','objections_open') else None
+        followup_id=admit_checks(controller,cid,evidence,task,h,output.get('next_checks',[]),source_ids,followups,
+            source_record_id=reservation['id']) if status in ('reviewed','objections_open') else None
         record=store.add('case_synthesis',cid,task_id=task['id'],evidence_id=evidence['id'],generation=generation,
             hypothesis_id=h['id'],number=h['number'],question=h['text'],status=status,finding=finding,
             supporting_evidence_ids=output.get('supporting_evidence_ids',[]),refuting_evidence_ids=output.get('refuting_evidence_ids',[]),
@@ -333,10 +364,12 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
         from .question_engine import checkpoint as save_question_checkpoint
         save_question_checkpoint(store,cid,task,h['id'],finding,record['id'],pending=bool(followup_id))
         if stream_meta:review_stream.complete(store,stream_meta,record['id'])
+        if status in ('reviewed','objections_open'):
+            request_attempt.accept([record,assessment],scope='question_scoped_synthesis')
     return False
 
 
-def admit_checks(controller,cid,evidence,task,h,calls,source_ids,previous):
+def admit_checks(controller,cid,evidence,task,h,calls,source_ids,previous,*,source_record_id=None):
     """Return to source review through the existing worker/check scheduler.
 
     No second executor and no unlimited synthesis/tool loop. A repeat logical
@@ -354,14 +387,14 @@ def admit_checks(controller,cid,evidence,task,h,calls,source_ids,previous):
         if o.get('evidence_id')==evidence['id'] and o['type'] in ('linux_environment','windows_environment')),None)
     if not run:return None
     previous_ids={d['id'] for d in previous}
-    fresh=[]
+    fresh=[];original_intents={}
     from .test_admission import reusable,bind_reuse,execution_fingerprint
     questions=question_engine.case_memory.project(store,cid,task)
     question=next((q for q in questions if h['id'] in q['source_ids']),{'question_key':h['id'],'version':len(previous)})
     for call in calls:
         if store.get(cid).get('target_os')=='windows' and call['tool'] not in ('search','read_source','correlate'):continue
         if call.get('question_id') and call['question_id']!=question.get('id'):continue
-        intent=question_engine.reserve(store,cid,task,question,call,evidence,run)
+        intent=question_engine.reserve(store,cid,task,question,call,evidence,run,source_record_id=source_record_id)
         if not intent['admission']['eligible']:continue
         fingerprint=digest([task['id'],task.get('retry_generation',0),run,evidence['signature'],fingerprint_scope(call)])
         fingerprint=execution_fingerprint(jobs,fingerprint)
@@ -370,6 +403,7 @@ def admit_checks(controller,cid,evidence,task,h,calls,source_ids,previous):
         if prior and any(c['dossier_id'] in previous_ids and c['contract_id']==condition for c in contracts(prior)):continue
         if not prior and tools_exhausted(len(jobs)+len(fresh),len(jobs)+len(fresh),False):continue
         fresh.append((call,fingerprint,prior))
+        original_intents[contract(call)['contract_id']]=intent
     if not fresh:return None
     dossier=store.add('dossier',cid,task_id=task['id'],evidence_id=evidence['id'],generation=task.get('retry_generation',0),
         title=h.get('title',h['text'])+' · 추가 판별',baseline=False,observation_ids=source_ids,
@@ -377,8 +411,22 @@ def admit_checks(controller,cid,evidence,task,h,calls,source_ids,previous):
         review_priority=0,review_family='question',status='pending',finding=None,origin_hypothesis_id=h['id'])
     admitted=[]
     for call,fingerprint,prior in fresh:
-        call={**call,'hypothesis_id':dossier['id']}
-        intent=question_engine.reserve(store,cid,task,question,call,evidence,run)
+        original_intent=original_intents[contract(call)['contract_id']]
+        binding_source=source_record_id
+        if call.get('test_design',{}).get('version')==2:
+            from .test_contract_v2 import bind_followup_owner,bind_existing_result
+            call,binding=bind_followup_owner(store,cid,task,evidence,run,call,original_intent,dossier,source_record_id)
+            binding_source=binding['id']
+        else:call={**call,'hypothesis_id':dossier['id']}
+        intent=question_engine.reserve(store,cid,task,question,call,evidence,run,source_record_id=binding_source)
+        if not intent['admission']['eligible']:continue
+        if prior and prior['status']=='ingested' and call.get('test_design',{}).get('version')==2 and contract(call) not in contracts(prior):
+            parents=contracts(prior)
+            if not parents:continue
+            parent=next((p for p in parents if p['dossier_id']==h['id']),parents[0])
+            call,binding=bind_existing_result(store,cid,task,evidence,run,call,intent,prior,binding_source,parent_contract=parent)
+            intent=question_engine.reserve(store,cid,task,question,call,evidence,run,source_record_id=binding['id'])
+            if not intent['admission']['eligible']:continue
         if prior:
             bind_reuse(store,cid,prior,intent)
             job=store.update(prior['id'],contracts=attach(prior,call),
@@ -391,6 +439,10 @@ def admit_checks(controller,cid,evidence,task,h,calls,source_ids,previous):
                 contracts=[contract(call)],dossier_ids=[dossier['id']],purpose='question_followup',
                 review_family='question',status='admitted',test_intent_ids=[intent['id']])
         admitted.append(job['id'])
+    if not admitted and task.get('test_contract_policy')=='purpose-outcomes-v2':
+        store.update(dossier['id'],status='deferred',deferred_reason='internal_reference_error',
+            error='추가 판별 검사의 정확 계약 또는 기존 결과 계보를 승인하지 못했습니다.')
+        return None
     store.add('dossier_batch',cid,task_id=task['id'],evidence_id=evidence['id'],generation=task.get('retry_generation',0),
         dossier_ids=[dossier['id']],status='await_checks',round=-1,attempts=0,output=None,job_ids=admitted,deferred_checks=[])
     return dossier['id']

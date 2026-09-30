@@ -78,7 +78,7 @@ def errors(output, dossier_ids, observation_ids, dossier_allowed=None, observati
     return issues
 
 
-def check_errors(output, checks, allowed_by_dossier):
+def check_errors(output, checks, allowed_by_dossier,*,presented_observations=None,canonical_observations=None):
     issues=[];by_key={};seen=set()
     for check in checks:
         for c in check.get('contracts') or [{'dossier_id':'','contract_id':''}]:
@@ -89,6 +89,23 @@ def check_errors(output, checks, allowed_by_dossier):
         if pair is None or key in seen:
             issues.append({'code':'invalid_check_assessment','id':key});continue
         seen.add(key);check,contract=pair
+        if contract.get('contract_version')==2:
+            from .test_contract_v2 import result_errors,bind_presented_view
+            design=contract['test_design']
+            refs=set(assessment.get('observation_ids',[]))
+            allowed=set(check.get('observation_ids',[]))
+            if key[1]:allowed &= set(allowed_by_dossier.get(key[1],[]))
+            canonical=canonical_observations or {}
+            shown={i:bind_presented_view(o,canonical[i]) if i in canonical else o
+                   for i,o in (presented_observations or {}).items()}
+            actual_check={**check,'result_scope':check.get('result_scope',check.get('scope') or {})}
+            for code in result_errors(design,actual_check,canonical or shown,
+                    presented_observations=shown,outcome=assessment['outcome'],refs=refs):
+                issues.append({'code':code,'id':key,'contract_version':2})
+            if refs-allowed:issues.append({'code':'check_citation_scope','id':key,'invalid_observation_ids':sorted(refs-allowed)})
+            if assessment.get('basis')=='absence' and assessment['outcome'] in ('supports','refutes','found'):
+                issues.append({'code':'absence_preconditions_unverified','id':key})
+            continue
         if assessment.get('basis')=='absence' and assessment['outcome']!='inconclusive':
             issues.append({'code':'absence_preconditions_unverified','id':key})
         refs=set(assessment['observation_ids'])
@@ -109,6 +126,10 @@ def check_errors(output, checks, allowed_by_dossier):
         if assessment['outcome']=='refutes' and check.get('status') not in ('covered','covered_zero') and not refs:
             issues.append({'code':'partial_search_not_refutation','id':key})
     for key in by_key.keys()-seen:
+        design=by_key[key][1].get('test_design') or {}
+        outcome='unavailable' if design.get('version')==2 and design.get('purpose')=='discover' else 'inconclusive'
         output.setdefault('check_assessments',[]).append({'check_id':key[0],'dossier_id':key[1],'contract_id':key[2],
-            'outcome':'inconclusive','evaluation_status':'unassessed','reason':'이 가설의 판별조건에 대한 결과 평가가 제공되지 않았습니다.','observation_ids':[]})
+            'outcome':outcome,'evaluation_status':'unassessed',
+            'reason':'이 검사의 결과 평가가 제공되지 않았습니다.' if design.get('version')==2 else '이 가설의 판별조건에 대한 결과 평가가 제공되지 않았습니다.',
+            'observation_ids':[]})
     return issues

@@ -201,7 +201,7 @@ class Store:
     def update(self, id, **changes):
         with self.lock:
             item = self.get(id)
-            if item['kind'] in ('observation','receipt','report','audit','judgment','review_input','review_diagnostic','case_synthesis','synthesis_input','falsifier_input','discovery_lead','objection_decision','decision_revision'):
+            if item['kind'] in ('observation','receipt','report','audit','judgment','review_input','review_diagnostic','case_synthesis','synthesis_input','falsifier_input','discovery_lead','objection_decision','decision_revision','request_lifecycle','explanation_relation'):
                 raise ValueError('불변 기록은 수정할 수 없습니다.')
             item.update(changes)
             self.db.execute('UPDATE records SET body=?,case_id=? WHERE id=?', (json.dumps(item,ensure_ascii=False),item['case_id'],id))

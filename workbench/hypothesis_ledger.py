@@ -46,6 +46,11 @@ def apply(store, case_id, evidence_id, assessment, valid_ids, *, task_id='', gen
         for existing in rows:
             if current_scope(existing,tasks,active) and any(r.get('origin_key')==origin for r in existing.get('revision_history',[])):
                 return existing
+        from .explanation_links import validate_proposals, record as record_links
+        manifest=source.get('accepted_claim_refs',(source.get('pack') or {}).get('accepted_claim_refs',[]))
+        links,link_errors=validate_proposals(store,case_id,assessment.get('explanation_links',[]),manifest,
+            task_id=task_id,evidence_id=evidence_id,generation=generation,valid_ids=valid_ids,
+            hypothesis_source_ids=refs)
         row=next((h for h in rows if hid in (h['id'],h.get('hypothesis_card_id')) and h.get('evidence_id')==evidence_id),None) if hid else None
         if action=='create':
             if hid:return None
@@ -92,5 +97,12 @@ def apply(store, case_id, evidence_id, assessment, valid_ids, *, task_id='', gen
             result=store.add('hypothesis',case_id,contract='dynamic-v1',hypothesis_kind='dynamic',number=number,
                 hypothesis_card_id='HYP-CARD-'+hashlib.sha256(origin.encode()).hexdigest()[:24],origin_key=origin,
                 origin_task_id=task_id,origin_generation=generation,**fields)
+        record_links(store,case_id,result,links,source_plan_id=source_plan_id)
+        if link_errors:
+            store.add('receipt',case_id,task_id=task_id,evidence_id=evidence_id,generation=generation,
+                receipt_type='explanation_link_rejected',source_plan_id=source_plan_id,
+                hypothesis_id=result['id'],hypothesis_revision=result['revision'],
+                failure_category='explanation_reference',validation_errors=link_errors,
+                error='설명 관계의 원문·주장 버전·대상 범위를 확인할 수 없어 해당 연결만 반영하지 않았습니다.')
         record_rank_changes(store,case_id,before,assessment.get('change_reason') or reason)
         return store.get(result['id'])

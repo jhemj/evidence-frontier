@@ -225,11 +225,13 @@ def _usage(value: Any) -> dict[str, Any]:
     return {}
 
 
-def infer(messages: Sequence[Mapping[str, Any]], schema: Mapping[str, Any], artifact_root: Path | str) -> tuple[str, dict[str, Any]]:
+def infer(messages: Sequence[Mapping[str, Any]], schema: Mapping[str, Any], artifact_root: Path | str, *, emit=None) -> tuple[str, dict[str, Any]]:
     """Run one isolated Luna request and return ``(final_text, receipt)``."""
     try:
-        request = json.dumps({"messages": messages}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        schema_bytes = json.dumps(_strict_schema(schema), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        from workbench.request_compiler import compile_codex_wrapper
+        wrapper=compile_codex_wrapper(messages,schema,schema_transform=_strict_schema)
+        request=wrapper.request_json.encode()
+        schema_bytes=wrapper.schema_json.encode()
     except (TypeError, ValueError) as exc:
         raise _service_error('invalid messages or unsupported transport schema','request-preparation',
             category='model_request_configuration',phase='preparation',retryable=False) from exc
@@ -264,6 +266,13 @@ def infer(messages: Sequence[Mapping[str, Any]], schema: Mapping[str, Any], arti
             try:
                 process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=spool, stderr=diagnostics, shell=False, cwd=workdir)
                 try:
+                    if emit is not None:
+                        # Local adapter entry, not observation of server generation
+                        # or proof that its discovery/authentication succeeded.
+                        emit('dispatch_attempted',delivery_state='unknown',process_started=True,
+                            request_attempted=None,dispatch_boundary='local_cli_adapter')
+                        emit('response_waiting',delivery_state='unknown',process_started=True,
+                            request_attempted=None,dispatch_boundary='local_cli_adapter')
                     process.communicate(input=request, timeout=180)
                 except subprocess.TimeoutExpired as exc:
                     process.kill()
@@ -272,6 +281,15 @@ def infer(messages: Sequence[Mapping[str, Any]], schema: Mapping[str, Any], arti
                         phase='generation',delivery_state='unknown')
                     failure.metadata['process_started']=True
                     raise failure from exc
+                except BaseException:
+                    # A failed event sink must not leave a local adapter running
+                    # without an observable owner or trigger a second request.
+                    try:
+                        process.kill()
+                        process.communicate()
+                    except OSError:
+                        pass
+                    raise
             except OSError as exc:
                 raise _service_error('unable to start Luna CLI','cli-start',
                     category='model_request_configuration',retryable=False) from exc
@@ -303,12 +321,17 @@ def infer(messages: Sequence[Mapping[str, Any]], schema: Mapping[str, Any], arti
         "actual_model": MODEL,
         "cli_version": cli_version,
         "input_sha256": _sha(request),
+        **wrapper.identity,
         "output_sha256": _sha(output),
         "wall_time_seconds": round(time.monotonic() - started, 3),
         "phase": "response_received", "process_started": True,
         "request_attempted": True, "delivery_state": "response_received",
         "usage": next((_usage(event) for event in reversed(events) if _usage(event)), {}),
     }
+    if emit is not None:
+        emit('response_received',delivery_state='response_received',
+            response_sha256=receipt['output_sha256'],output_characters=len(content),usage=receipt['usage'],
+            request_attempted=True,dispatch_boundary='codex_luna_response')
     return content, receipt
 
 

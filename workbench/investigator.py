@@ -30,9 +30,12 @@ class Investigator(Protocol):
 
 
 class NativeInvestigator:
-    def __init__(self, config, provider_factory):
+    def __init__(self, config, provider_factory, *, attempt=None, emit=None, compiled_request=None):
         self.config = ProviderConfig.model_validate(config).model_dump()
         self.provider_factory = provider_factory
+        self.attempt=attempt
+        self.emit=emit
+        self.compiled_request=compiled_request
 
     def propose(self, request):
         if request.role not in ROLES:
@@ -47,7 +50,14 @@ class NativeInvestigator:
             raise ValueError('조사 도구 목록이 대상 OS 범위를 벗어났습니다.')
         request_hash=hashlib.sha256(serialize({'question':request.question,'pack':pack,'role':request.role}).encode()).hexdigest()
         selection=pack.get('selection_audit')
-        output, receipt = self.provider_factory(self.config).generate(request.question, pack, role=request.role)
+        provider=self.provider_factory(self.config)
+        binder=getattr(provider,'bind_lifecycle',None)
+        if self.emit is not None and callable(binder):binder(self.attempt,self.emit)
+        compiled_binder=getattr(provider,'bind_compiled_request',None)
+        if self.compiled_request is not None and callable(compiled_binder):compiled_binder(self.compiled_request)
+        # Legacy adapters/mocks remain usable. Without an explicit callback we
+        # cannot claim dispatch, response receipt or model generation occurred.
+        output, receipt = provider.generate(request.question, pack, role=request.role)
         # Detailed schema/citation/assessment gates remain in Provider and the
         # owning controller phases. This transport gate never executes a proposal.
         for call in output.get('tool_calls',[]) + output.get('next_checks',[]):
@@ -64,7 +74,7 @@ class NativeInvestigator:
         return output, receipt
 
 
-def consult(config, question, pack, role, provider_factory=None):
+def consult(config, question, pack, role, provider_factory=None, *, attempt=None, emit=None, compiled_request=None):
     if config.get('investigator','native') != 'native':
         raise ValueError('검증·등록되지 않은 외부 조사자는 실행할 수 없습니다.')
     if provider_factory is None:
@@ -72,4 +82,4 @@ def consult(config, question, pack, role, provider_factory=None):
         provider_factory = Provider
     # Serialization severs mutable references into controller-owned state.
     request = InvestigatorRequest(question, serialize(pack), role)
-    return NativeInvestigator(config, provider_factory).propose(request)
+    return NativeInvestigator(config, provider_factory,attempt=attempt,emit=emit,compiled_request=compiled_request).propose(request)

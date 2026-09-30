@@ -8,6 +8,19 @@ REVIEW_BUDGET={'normal_model_attempts':576,'total_model_attempts':582,'reserved_
 
 def contract(call):
     conditions={k:call.get(k,'') for k in ('success_condition','refutation_condition','inconclusive_condition')}
+    from .test_contract_v2 import is_v2,digest
+    if is_v2(call.get('test_design')):
+        from .models import TestDesignV2
+        design=TestDesignV2.model_validate(call['test_design']).model_dump()
+        owner=call.get('hypothesis_id') or design['owner_ref']['id']
+        payload={'contract_version':2,'owner':owner,'question_id':call.get('question_id'),'test_design':design,'conditions':conditions}
+        lineage=call.get('_controller_owner_lineage')
+        if lineage:payload['controller_owner_lineage']=lineage
+        fingerprint=digest(payload)
+        result={'dossier_id':owner,'contract_id':fingerprint,
+                'contract_version':2,'question_id':call.get('question_id'),'test_design':design,**conditions}
+        if lineage:result['controller_owner_lineage']=lineage
+        return result
     fingerprint=hashlib.sha256(json.dumps(conditions,sort_keys=True).encode()).hexdigest()
     return {'dossier_id':call['hypothesis_id'],'contract_id':fingerprint,**conditions}
 
