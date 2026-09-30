@@ -9,6 +9,7 @@ import json
 
 from .evidence_semantics import exact_utc_ns, observation_time
 from .temporal import file_anchors
+from .observer_activity import model_context, failure_details
 
 VERSION = 'observer-view-1'
 
@@ -329,6 +330,7 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
     by_reservation = {r.get('reservation_id'): r for r in receipts if r.get('reservation_id')}
     by_input = {r.get('input_record_id'): r for r in receipts if r.get('input_record_id')}
     activities = []
+    dossier_records = {d['id']: d for d in by_kind.get('dossier', []) if scoped(d)}
     for j in jobs:
         terminal = j.get('status') in ('received', 'ingested')
         state = (j.get('result_status') or 'unknown') if terminal else 'failed' if j.get('status') in ('failed','rejected') else 'running' if j.get('worker_status') == 'running' else 'waiting' if j.get('dispatched_at') else 'queued'
@@ -341,21 +343,30 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             'at': j.get('ended_at') or j.get('dispatched_at') or j.get('created_at'), 'error': j.get('error'),
             'timer_at':start if state in ('running','waiting') else None,
             'timer_origin':'execution' if j.get('started_at') else 'dispatch' if start else None,
+            'failure':failure_details(j) if state=='failed' else None,
             'task_id': j.get('task_id'), 'result_adopted': j.get('status') == 'ingested'})
     for r in by_kind.get('model_reservation', []) + by_kind.get('review_input', []) + by_kind.get('synthesis_input', []):
         if not scoped(r):
             continue
         receipt = by_reservation.get(r['id']) or by_input.get(r['id'])
+        if receipt and (receipt.get('task_id') != r.get('task_id') or
+                        receipt.get('generation', 0) != r.get('generation', 0)):
+            receipt = None
         error = (receipt or {}).get('error') or r.get('error')
         received = bool(receipt) or r.get('status') == 'received'
-        model_state = 'failed' if error or r.get('status') == 'failed' else 'received' if received else 'input_registered'
+        # Saved input is not dispatch evidence. Only an explicit request-start
+        # record can describe a model as currently executing.
+        started = r.get('request_started_at')
+        model_state = 'failed' if error or r.get('status') == 'failed' else 'received' if received else 'running' if started else 'input_registered'
+        failure = failure_details(r, receipt) if model_state == 'failed' else None
         activities.append({'id': r['id'], 'kind': 'model',
-            'title': '모델 응답 수신 · 채택과 별개' if received and not error else '모델 요청 실패' if model_state == 'failed' else '모델 입력 등록 · 실제 요청·응답 상태 미제공',
+            'title': failure['title'] if failure else '모델 응답 수신 · 채택과 별개' if received else 'AI 검토 진행 중' if started else '검토 입력 준비됨 · 실행 상태 미제공',
             'state': model_state,
             'target': r.get('activity_target') or r.get('purpose') or '구조화 판단',
+            'context':model_context(r, dossier_records), 'failure':failure,
             'at': (receipt or {}).get('created_at') or r.get('created_at'), 'error': error,
-            'timer_at':r.get('created_at') if model_state=='input_registered' else None,
-            'timer_origin':'input_registered' if model_state=='input_registered' else None,
+            'timer_at':started if model_state=='running' else r.get('created_at') if model_state=='input_registered' else None,
+            'timer_origin':'execution' if model_state=='running' else 'input_registered' if model_state=='input_registered' else None,
             'task_id': r.get('task_id'), 'result_adopted': None})
     for t in tasks.values():
         if t.get('status') == 'running' and not any(a['task_id'] == t['id'] and a['state'] in ('running', 'waiting') for a in activities):

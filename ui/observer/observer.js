@@ -84,7 +84,11 @@ function alerts() {
   if(state.changes.length)warnings.push('판단·근거 표시 '+state.changes.length+'건이 바뀌었어요. 무엇이 달라졌는지는 작업 이력에서 확인할 수 있어요.');
   if(state.omittedChanges)warnings.push('이 브라우저의 변경 이력은 최근 200건만 표시합니다. 앞선 '+state.omittedChanges+'건은 원장 이력에서 확인해야 합니다.');
   const failures=state.current?currentActivity().items.filter(a=>a.state==='failed'):[];
-  if(failures.length)warnings.push('지난 작업에 실패 기록이 있어요. 복구됐는지는 아직 확인하지 못했어요. 영향받은 내용은 작업 이력에서 볼 수 있어요.');
+  for(const a of failures.slice(0,2)){
+    const f=ObserverMoa.failure(a);
+    warnings.push('지난 실패 기록: '+f.label+' — '+f.reason+' '+f.impact);
+  }
+  if(failures.length>2)warnings.push('다른 실패 기록 '+(failures.length-2)+'건은 작업 이력에서 확인할 수 있어요.');
   const reportFailures=(state.current?.report_finalizations||[]).filter(r=>r.status==='failed'||r.status==='superseded');
   if(reportFailures.length)warnings.push('부분 보고서 마감 '+reportFailures.length+'건 실패·범위 변경. 보고서 생성과 조사 종료는 별개입니다. '+(reportFailures.at(-1).error||''));
   const c=clear('critical');c.hidden=!warnings.length;for(const w of warnings)c.append(node('p',w));
@@ -145,9 +149,19 @@ function renderNarrative() {
     '당시에 정리한 설명을 보고 있어요. 현재 조사 상태·사건 시간축·보고서는 그대로 유지돼요.';
   work.append(badge(real?'지금 조사 중':!available?'연결 확인 중':ctx.ended?'조사가 멈춰 있어요':'현재 상태'));
   const liveText=node('p',workExplanation.label);liveText.id='guide-work-live';work.append(liveText);updateLiveWork();
-  if(!activeExplanation&&live.hypotheses.length)work.append(node('p',live.hypotheses.some(h=>h.assessment_current)?
-    '어느 가설을 확인하는 작업인지는 아직 연결되지 않았어요.':
-    '가설은 남아 있지만 새 근거까지 반영한 판단은 아직 없어요. 지금 유력하다고 말하진 않을게요.','note'));
+  if(workExplanation.subjects?.length){
+    const list=node('ul',null,'review-subjects');
+    for(const s of workExplanation.subjects){
+      const item=node('li');item.append(node('strong',s.label));
+      if(s.paths.length)item.append(node('div',s.paths.join(' · '),'note'));
+      if(s.omitted)item.append(node('div','검토 입력 기록 '+s.presented+'개 중 예시 '+s.examples.length+'개를 보여드려요.','note'));
+      list.append(item);
+    }
+    work.append(list);
+    const omitted=ObserverMoa.currentItem(currentActivity().items)?.context?.omitted_subject_count;
+    if(omitted)work.append(node('p','이 화면에 연결하지 못한 검토 대상 '+omitted+'개가 더 있어요.','note'));
+  }
+  if(workExplanation.statusNote)work.append(node('p',workExplanation.statusNote,'note'));
   if(state.pinned)work.append(badge('과거 내용을 보고 있어요','warn'));
   if(past)work.append(node('p','설명을 넘겨 봐도 실제 조사는 바뀌지 않아요.','note'));
   if(primary){
@@ -246,9 +260,15 @@ function navigateExplanation(delta){
 }
 function activityRow(a) {
   const n=node('div',null,'activity-item');
-  n.append(badge(execution[a.state]||'상태 미제공',a.state==='failed'?'error':''),node('strong',a.title),node('div',a.target,'target'));
+  n.append(badge(execution[a.state]||'상태 미제공',a.state==='failed'?'error':''),node('strong',a.title),node('div',ObserverMoa.workTarget(a),'target'));
+  if(a.failure)n.append(node('p',a.failure.reason),node('p',a.failure.impact,'note'));
   n.append(node('div',dt(a.at),'when'));
   const details=node('details');details.append(node('summary',a.error?'실패 원인·작업 참조':'작업 참조'),node('div',a.id,'target'));
+  for(const s of ObserverMoa.reviewSubjects(a)){
+    details.append(line('검토 단서',s.title||s.id));
+    for(const e of s.examples)details.append(node('p',e.label+(e.path?' · '+e.path:'')));
+    if(s.omitted)details.append(node('p','입력의 다른 기록 '+s.omitted+'개는 이 요약에서 생략했어요.','note'));
+  }
   if(a.error)details.append(node('p',a.error,'note'));n.append(details);return n;
 }
 function renderActivity() {

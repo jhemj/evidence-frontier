@@ -27,6 +27,25 @@
     investigation_report:['organizing','확인한 내용과 남은 의문을 보고서로 정리하고 있어요.', '근거와 불확실성을 함께 전달하기 위해서예요.', '보고서가 생성돼도 조사 공백이 없어지는 것은 아니에요.']
   };
   function compact(value){return typeof value==='string'?value.replace(/[\r\n\t\x00-\x1f]/g,' ').trim().slice(0,90):'';}
+  function reviewSubjects(item){
+    return (item?.context?.subjects||[]).map(s=>({id:s.id,title:s.title,
+      examples:s.examples||[],presented:s.presented_records,omitted:s.omitted_examples,
+      label:(s.examples||[]).map(e=>e.label).join(' / ')||s.title||'검토 내용 미제공',
+      paths:[...new Set((s.examples||[]).map(e=>e.path).filter(Boolean))]}));
+  }
+  function workTarget(item){
+    const subjects=reviewSubjects(item);
+    if(subjects.length)return compact(subjects[0].label)+(subjects.length>1?' 외 '+(subjects.length-1)+'개 단서':'');
+    return compact(item?.target)||'검토 대상 미제공';
+  }
+  function failure(item){
+    if(!item||item.state!=='failed')return null;
+    const affected=item.failure?.subject_ids||[],subjects=reviewSubjects(item).filter(s=>affected.includes(s.id));
+    const target=subjects.length?compact(subjects[0].label)+(subjects.length>1?' 외 '+(subjects.length-1)+'개 단서':''):workTarget(item);
+    return {label:'‘'+target+'’ · '+(item.failure?.title||'작업 실패'),
+      reason:item.failure?.reason||'상세 실패 원인은 작업 기록에서 확인할 수 있어요.',
+      impact:item.failure?.impact||'이 작업이 어느 판단에 영향을 주는지는 아직 연결되지 않았어요.'};
+  }
   function currentItem(items){
     // A concrete tool/model request is more specific than its long-running parent task.
     return items.find(a=>a.kind==='tool'&&a.state==='running')||
@@ -51,14 +70,20 @@
           why:compact(current.purpose)||'연결된 가설을 구별할 기록을 찾기 위해서예요.',
           meaning:'결과를 확보한 뒤 어떤 설명을 뒷받침하는지 대조해요.'};
       }
-      if(current.state==='input_registered')return {base:'waiting',label:
-        (target&&target!=='구조화 판단'?'‘'+target+'’에 대한':'단서에 대한')+' AI 검토를 기다리고 있어요.'};
+      if(current.kind==='model'){
+        const subjects=reviewSubjects(current),subject=subjects.length?'‘'+workTarget(current)+'’':
+          target&&target!=='구조화 판단'?'‘'+target+'’':'단서';
+        return {base:current.state==='input_registered'?'waiting':'thinking',
+          label:subject+(current.state==='input_registered'?'의 검토 입력이 준비됐어요.':'를 검토하고 있어요.'),
+          subjects,
+          why:'이 기록이 어떤 설명을 뒷받침하는지, 다른 설명과 모순되는 부분은 없는지 대조하는 검토예요.',
+          statusNote:current.state==='input_registered'?'검토할 내용은 확인됐지만, AI의 실제 실행 상태는 아직 전달되지 않았어요.':null};
+      }
       const stage=stages[current.title];
       if(stage)return {base:stage[0],label:stage[1],why:stage[2],meaning:stage[3]};
       if(current.purpose)return {base:current.kind==='model'?'thinking':'searching',label:current.purpose,
         why:'원장에 기록된 이번 작업 목적이에요. 어떤 가설과 연결되는지는 아래 설명에서 확인할 수 있어요.',
         meaning:'결과의 지지·반박 여부는 검사 이후의 판단을 확인해야 해요.'};
-      if(current.kind==='model')return {base:'thinking',label:'근거를 대조하고 있어요'};
       if(current.kind==='report'||current.title==='investigation_report')return {base:'organizing',label:'확인한 내용을 정리하고 있어요'};
       if(current.kind==='tool'||current.kind==='collection'||['integrity','inventory','normalize','timeline','linux_scan','windows_scan'].includes(current.title))
         return {base:'searching',label:'기록에서 단서를 찾고 있어요'};
@@ -66,7 +91,8 @@
     }
     if(items.some(a=>['waiting','input_registered'].includes(a.state)))
       return {base:'waiting',label:'다음 응답을 기다려요 · 전송 여부는 아직 미확인'};
-    if(items.some(a=>a.state==='failed'))return {base:'concerned',label:'실패한 작업의 영향 확인이 필요해요'};
+    const failed=items.find(a=>a.state==='failed');
+    if(failed){const f=failure(failed);return {base:'concerned',label:f.label,why:f.reason,meaning:f.impact};}
     return {base:'idle',label:'지금 실행 중인 작업은 없어요'};
   }
   function elapsedActivity(view,items,{available=true,now=Date.now(),observedSince=null}={}){
@@ -100,5 +126,5 @@
     idle:{label:'차분히 쉬기',base:'idle'},
     ended:{label:'조사 멈춤',base:'ended'}
   });
-  if(typeof module!=='undefined')module.exports={judgment,activity,elapsedActivity,currentItem,previews};else root.ObserverMoa={judgment,activity,elapsedActivity,currentItem,previews};
+  if(typeof module!=='undefined')module.exports={judgment,activity,elapsedActivity,currentItem,reviewSubjects,workTarget,failure,previews};else root.ObserverMoa={judgment,activity,elapsedActivity,currentItem,reviewSubjects,workTarget,failure,previews};
 })(typeof window!=='undefined'?window:globalThis);

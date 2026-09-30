@@ -8,6 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from workbench.observer_view import digest, project, stamp, validate
+from workbench.observer_activity import input_context
 
 KINDS = ('case', 'epoch', 'task', 'evidence', 'claim', 'dossier', 'case_synthesis', 'case_question', 'business_question', 'hypothesis_proposal', 'decision_revision',
          'test_intent', 'test_result_use', 'investigation_job', 'hypothesis',
@@ -79,6 +80,24 @@ def capture(database, case_id, run_id, sequence=1, *, data_mode='replay'):
         rows = [json.loads(b) for b, in connection.execute(
             f'SELECT json_remove(body,{remove}) FROM records WHERE case_id=? AND kind IN ({",".join("?" for _ in KINDS)}) ORDER BY created_at,id',
             (case_id, *KINDS))]
+        inputs = {r['id']: r for r in rows if r['kind'] in ('review_input', 'synthesis_input')}
+        # Extract only bounded source labels from the saved request in this same
+        # transaction. Do not export whole prompts, rejected output or command bodies.
+        for identity, required, observations, mode in connection.execute("""
+            SELECT id, json_extract(body,'$.pack.required_dossiers'),
+              (SELECT json_group_array(json_object('id',json_extract(value,'$.id'),
+                'fields',json_object(
+                  'path',substr(json_extract(value,'$.fields.path'),1,221),
+                  'command',substr(json_extract(value,'$.fields.command'),1,221),
+                  'excerpt',substr(json_extract(value,'$.fields.excerpt'),1,221),
+                  '_display_partial',length(json_extract(value,'$.fields.excerpt'))>221)))
+                FROM json_each(body,'$.pack.observations')),
+              json_extract(body,'$.pack.review_mode')
+            FROM records WHERE case_id=? AND kind IN ('review_input','synthesis_input')
+            """, (case_id,)):
+            inputs[identity]['_activity_context'] = input_context({
+                'required_dossiers': json.loads(required or '[]'),
+                'observations': json.loads(observations or '[]'), 'review_mode': mode})
         # Unreviewed dossier inventory is not a displayed claim. Do not ship
         # thousands of unrelated source objects just because they are queued.
         reference_rows = [r for r in rows if r['kind'] != 'dossier' or r.get('finding')]
