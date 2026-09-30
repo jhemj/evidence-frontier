@@ -31,7 +31,11 @@ FROM worker AS test
 USER root
 COPY requirements-dev.lock ./
 RUN --mount=type=secret,id=ca_bundle,required=false if [ -f /run/secrets/ca_bundle ]; then export PIP_CERT=/run/secrets/ca_bundle; fi; pip install --no-cache-dir --require-hashes -r requirements-dev.lock
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs && rm -rf /var/lib/apt/lists/*
 COPY tests ./tests
+COPY scripts ./scripts
+COPY ui ./ui
 COPY pyproject.toml ./
+ENV FRONTIER_TEST_NODE=node
 USER frontier
 CMD ["python","-m","pytest","-q"]

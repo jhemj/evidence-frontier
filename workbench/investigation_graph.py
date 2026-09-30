@@ -202,7 +202,7 @@ class Investigation:
             from . import model_availability
             try:
                 output, receipt = consult(config, question, pack, role='investigator', provider_factory=Provider)
-                model_availability.recovered(self.s,self.case_id)
+                model_availability.recovered(self.s,self.case_id,receipt.get('transport_identity'))
             except (httpx.TransportError,ValueError) as ex:
                 if model_availability.unavailable(ex):
                     with self.s.tx():
@@ -604,7 +604,7 @@ class Investigation:
                 from . import model_availability
                 try:
                     review,receipt=consult(config,question,pack,role='falsifier',provider_factory=Provider)
-                    model_availability.recovered(self.s,self.case_id)
+                    model_availability.recovered(self.s,self.case_id,receipt.get('transport_identity'))
                 except (httpx.TransportError,ValueError) as ex:
                     if model_availability.unavailable(ex):
                         with self.s.tx():

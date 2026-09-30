@@ -25,6 +25,41 @@ def _object(observation):
         ('partition_offset','os_instance','volume_id','snapshot_id','path')])
 
 
+def semantic_question(item, text, kind):
+    """Definition and evidence roles, never an assessment of the question itself."""
+    return {'definition': text, 'kind': kind,
+        **{k:item[k] for k in ('competing_explanations','conditions','basis',
+            'observation_ids','supporting_evidence_ids','refuting_evidence_ids',
+            'counterevidence_ids','required_observation_ids') if k in item}}
+
+
+def business_question(store, cid, evidence, item, kind, text):
+    """Stable business identity; task/generation envelopes remain separate.
+
+    Do not merge unrelated questions by textual similarity. The case-wide root
+    is shared across evidence; explicit source IDs identify other definitions.
+    Existing context/decision records are not rewritten or retroactively merged.
+    """
+    source=item.get('business_source_id') or item.get('id') or item.get('hypothesis_id') or item.get('claim_id')
+    identity=_digest([cid,kind,cid if kind=='case_question' else source or [evidence['id'],text]])
+    old=next((q for q in store.list('business_question',cid) if q['identity']==identity),None)
+    explicit=item.get('question') or (item.get('scenario_assessment') or {}).get('comparison_question')
+    # A new assessment's title is not a redefinition of the business question.
+    definition=explicit or (old or {}).get('question') or text
+    if kind in ('case_question','claim','objection'):definition=explicit or text
+    revision=_digest({'definition':definition,'source_kind':kind})
+    root=next((q for q in store.list('business_question',cid) if q['source_kind']=='case_question'),None)
+    fields={'identity':identity,'question':definition,'source_kind':kind,
+        'definition_revision':revision,'source_ids':[source] if source else [],
+        'parent_question_id':None if kind=='case_question' else item.get('parent_question_id') or (root or {}).get('id')}
+    if not old:return store.add('business_question',cid,version=1,**fields)
+    if old.get('definition_revision')!=revision:
+        return store.update(old['id'],version=old['version']+1,**fields)
+    if old.get('parent_question_id')!=fields['parent_question_id']:
+        return store.update(old['id'],parent_question_id=fields['parent_question_id'])
+    return old
+
+
 def sync(store,cid,task,evidence,observations=(),hypotheses=(),objections=(),claims=()):
     tid=task['id'];eid=evidence['id'];generation=_generation(task)
     by_id={o['id']:o for o in observations}
@@ -38,6 +73,8 @@ def sync(store,cid,task,evidence,observations=(),hypotheses=(),objections=(),cla
         if not text:continue
         kind=item.get('source_kind') or item.get('kind') or ('objection' if 'statement' in item else 'hypothesis')
         source=item.get('id') or item.get('hypothesis_id') or item.get('claim_id')
+        business=business_question(store,cid,evidence,item,kind,text)
+        text=business['question']
         refs=sorted(set(item.get('observation_ids',[])+item.get('supporting_evidence_ids',[])+item.get('refuting_evidence_ids',[])))
         key=_digest([tid,eid,generation,kind,source or [text,refs]])
         live_keys.add(key)
@@ -46,13 +83,17 @@ def sync(store,cid,task,evidence,observations=(),hypotheses=(),objections=(),cla
         identities.update(tuple(i) for i in (old or {}).get('object_identities',[]))
         related=sorted(i for i,o in by_id.items() if i in refs or _object(o) in identities)
         dependency=_digest({'sources':[(i,hashes.get(i,'unavailable')) for i in sorted(set(refs+related))],
-            'question':item,'evidence_connected':evidence.get('connected',True),'signature':evidence.get('signature'),
+            'question':semantic_question(item,text,kind),'evidence_connected':evidence.get('connected',True),'signature':evidence.get('signature'),
             'corpus':corpus_revision if kind=='case_question' else None,
-            'objections':[o for o in objections if set(o.get('observation_ids',[]))&set(refs+related)]})
+            'objections':[{'id':o.get('id'),'statement':o.get('statement'),
+                'observation_ids':o.get('observation_ids',[]),'status':o.get('status')}
+                for o in objections if set(o.get('observation_ids',[]))&set(refs+related)]})
         changed=bool(old and old['dependency_revision']!=dependency)
         if old and not changed:
             rows.append(old);continue
         values={'question_key':key,'question':str(text),'source_kind':kind,'source_ids':[source] if source else [],
+            'business_question_id':business['id'],'definition_revision':business['definition_revision'],
+            'parent_question_id':business.get('parent_question_id'),
             'observation_ids':refs,'related_observation_ids':related,'object_identities':[list(i) for i in sorted(identities,key=str)],
             'status':'reopened' if old else 'open','state':'reopened' if old else 'open',
             'task_id':tid,'evidence_id':eid,'generation':generation,'corpus_revision':corpus_revision,
@@ -95,6 +136,7 @@ def assess(store,cid,question_id,status,reason,observation_ids=(),receipt_id=Non
 def reserve(store,cid,question,tool,scope,conditions=None,question_version=None):
     key=question.get('question_key') if isinstance(question,dict) else question
     intent={'question_key':key,'question_id':question.get('id') if isinstance(question,dict) else None,
+        'business_question_id':question.get('business_question_id') if isinstance(question,dict) else None,
         'tool':tool,'scope':scope,'conditions':conditions or {},
         'question_version':question_version if question_version is not None else question.get('version') if isinstance(question,dict) else None}
     digest=_digest(intent)

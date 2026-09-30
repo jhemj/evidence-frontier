@@ -117,14 +117,25 @@ def preview_document(controller,case_id):
     return doc
 
 
-def build_report(controller,case_id,report_root):
+def build_report(controller,case_id,report_root,*,expected_revision=None,finalization_id=None):
     with controller.store.tx():
+        if finalization_id:
+            prior=next((r for r in controller.store.list('report',case_id) if r.get('finalization_id')==finalization_id),None)
+            if prior:return prior
         revision=controller.store.report_revision(case_id)
+        if expected_revision is not None and revision!=expected_revision:
+            raise ValueError('보고서 마감 이후 조사 근거나 판단이 변경되었습니다. 현재 결과로 다시 생성하세요.')
         doc=report_document(controller,case_id)
+        if finalization_id:
+            request=controller.store.get(finalization_id,'report_finalization')
+            if request['case_id']!=case_id:raise ValueError('다른 사건의 보고서 마감 요청입니다.')
+            doc['execution_closure']={k:request.get(k) for k in ('id','reason','execution_status','epoch_id','source_revision')}
     identity={'case_id':case_id,'scope_revision':revision,'result_revision':doc['case'].get('result_revision'),
               'evidence':[{k:e.get(k) for k in ('id','signature','connected')} for e in doc['evidence']]}
+    from .judgment_snapshot import manifest as claim_manifest
+    identity['claim_versions']=claim_manifest(doc)
     doc['snapshot']={**identity,'scope_sha256':hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest(),
-                     'captured_at':doc['generated_at'],'version':1}
+                     'captured_at':doc['generated_at'],'version':2}
     from .report_views import project, VERSION
     from .report_docx import render as render_docx
     views=project(doc)
@@ -164,7 +175,10 @@ def build_report(controller,case_id,report_root):
     with controller.store.tx():
         if controller.store.report_revision(case_id)!=revision:
             raise ValueError('보고서 생성 중 조사 근거나 판단이 변경되었습니다. 현재 결과로 다시 생성하세요.')
+        if finalization_id:
+            prior=next((r for r in controller.store.list('report',case_id) if r.get('finalization_id')==finalization_id),None)
+            if prior:return prior # Another process adopted the same closure.
         return controller.store.add('report',case_id,report_id=doc['id'],sha256=archive_hash,
-            snapshot=doc['snapshot'],result_revision=doc['case'].get('result_revision'),
+            snapshot=doc['snapshot'],result_revision=doc['case'].get('result_revision'),finalization_id=finalization_id,
             reader_contract=VERSION,distributed_files={name:hashlib.sha256(value).hexdigest() for name,value in distributed.items()},
             claim_count=len(doc['claims']),gap_count=len(doc['limitations']))

@@ -165,14 +165,22 @@ def install_assisted_provider(analysis_root: Path, driver_path: Path | None = No
             manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
 
     def audit_luna_failure(captured, error, role):
-        attempted='payload' in captured
+        entered='payload' in captured
+        metadata=dict(getattr(error,'metadata',{}))
+        actual=captured.get('luna_receipt') or {}
+        # Entering the adapter or spawning a CLI is not delivery to the model.
+        attempted=actual.get('request_attempted',metadata.get('request_attempted',None if entered else False))
+        delivery=actual.get('delivery_state',metadata.get('delivery_state','unknown' if entered else 'not_sent'))
         row = {"id": "LUNA-ERROR-" + uuid.uuid4().hex, "created_at": datetime.now(timezone.utc).isoformat(),
-               "test_only": True, "transport": "codex-luna" if attempted else "request-preparation", "role": role, "driver_sha256": driver_sha256,
+               "test_only": True, "transport": "codex-luna" if entered else "request-preparation", "role": role, "driver_sha256": driver_sha256,
                "adapter_sha256": adapter_sha256, "model": _luna_adapter.MODEL, "reasoning_effort": "low",
                "error_type": "pydantic_gate" if getattr(error, "category", "") == "output_schema" else "transport",
                "error": str(error)[:1000],
-               "request_attempted":attempted,"failure_metadata":getattr(error,'metadata',{}),
-               "request_sha256": hashlib.sha256(json.dumps(captured['payload'], sort_keys=True, ensure_ascii=False).encode()).hexdigest() if attempted else None}
+               "adapter_entered":entered,"request_attempted":attempted,"delivery_state":delivery,
+               "phase":metadata.get('phase','output_validation' if actual else 'unknown' if entered else 'preparation'),
+               "failure_category":getattr(error,'category','unclassified'),"failure_metadata":metadata,
+               "transport_identity":luna_identity,
+               "request_sha256": hashlib.sha256(json.dumps(captured['payload'], sort_keys=True, ensure_ascii=False).encode()).hexdigest() if entered else None}
         if captured.get("luna_receipt"):
             row["usage"] = captured["luna_receipt"].get("usage", {})
         with lock:
@@ -208,11 +216,11 @@ def install_assisted_provider(analysis_root: Path, driver_path: Path | None = No
             if path != "/api/chat":
                 raise ValueError('Unsupported assisted transport operation: '+path)
             captured["payload"] = payload
-            self._request_attempted=True
             schema = review_output_schema(role,pack) if role in ('judgment','synthesis') else {'falsifier':Falsification,'investigator':InvestigationPlan,'analyst':Analysis}[role]
             output_schema = payload.get('format') if isinstance(payload.get('format'),dict) else schema.model_json_schema()
             content, luna_receipt = infer(payload["messages"], output_schema, transport_root)
             captured["luna_receipt"] = luna_receipt
+            self._request_attempted=luna_receipt.get('request_attempted')
             return {"done_reason": "stop", "message": {"content": content}, "eval_count": luna_receipt.get("usage", {}).get("output_tokens", 0)}
 
         self.response = response
@@ -238,7 +246,8 @@ def install_assisted_provider(analysis_root: Path, driver_path: Path | None = No
             "request_sha256": hashlib.sha256(json.dumps(captured.get("payload", {}), sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
             "model": _luna_adapter.MODEL,
         }
-        for key in ("cli_version", "input_sha256", "output_sha256", "wall_time_seconds", "usage"):
+        for key in ("cli_version", "input_sha256", "output_sha256", "wall_time_seconds", "usage",
+                    "phase", "process_started", "request_attempted", "delivery_state"):
             if key in captured.get("luna_receipt", {}):
                 transport[key] = captured["luna_receipt"][key]
         # Keep the receipt transport-only: no prompt, response, or private reasoning.

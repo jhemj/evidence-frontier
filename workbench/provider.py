@@ -22,10 +22,16 @@ class ModelServiceError(ValueError):
     """Infrastructure failure, not an invalid evidence interpretation."""
     category='model_service_unavailable'
 
-    def __init__(self, message, *, transport, operation, request_attempted=False):
+    def __init__(self, message, *, transport, operation, request_attempted=False,
+                 category='model_service_unavailable', phase=None, retryable=True,
+                 delivery_state=None):
         super().__init__(message)
+        self.category=category
         self.metadata={'transport':transport,'operation':operation,
-                       'request_attempted':request_attempted}
+                       'request_attempted':request_attempted,'failure_category':category,
+                       'phase':phase or ('generation' if request_attempted else 'preflight'),
+                       'retryable':retryable,
+                       'delivery_state':delivery_state or ('unknown' if request_attempted else 'not_sent')}
 
 
 def validate_url(url, trusted_lan=False):
@@ -82,17 +88,36 @@ class Provider:
         self._operation=path
         if path in ('/api/chat','/chat/completions'):self._request_attempted=True
         r=self.client.post(self.base+path,json=payload)
-        if r.status_code==429 or r.status_code>=500:
-            raise ModelServiceError(f'모델 서버 일시 오류 ({r.status_code})',
-                transport=self.config['protocol'],operation=path,
-                request_attempted=getattr(self,'_request_attempted',False))
-        if r.is_error:
-            try:
-                detail=r.json().get('error','')
-                if isinstance(detail,dict):detail=detail.get('message','')
-            except ValueError:detail=''
-            raise ValueError(f'모델 서버 응답 {r.status_code}: {str(detail)[:1000]}')
-        return r.json()
+        self.check_http_status(r,path)
+        return self.response_json(r,path)
+
+    def response_json(self,response,operation):
+        try:return response.json()
+        except ValueError as error:
+            raise ModelServiceError('모델 서버의 응답 프로토콜이 올바르지 않습니다.',
+                transport=self.config['protocol'],operation=operation,
+                request_attempted=getattr(self,'_request_attempted',False),
+                category='model_transport_protocol',retryable=False,
+                delivery_state='response_received') from error
+
+    def check_http_status(self,response,operation):
+        """A server rejection is not a model's evidence interpretation.
+
+        Do not persist response bodies: authentication/configuration diagnostics
+        can contain credentials or deployment details. No automatic fallback.
+        """
+        if 200<=response.status_code<300:return
+        status=response.status_code
+        transient=status==429 or status>=500
+        category=('model_authentication' if status in (401,403) else
+                  'model_service_unavailable' if transient else 'model_request_configuration')
+        failure=ModelServiceError(f'모델 서버 응답 오류 ({status})',
+            transport=self.config['protocol'],operation=operation,
+            request_attempted=getattr(self,'_request_attempted',False),
+            category=category,phase='preflight' if operation=='/api/tags' else 'generation',
+            retryable=transient,delivery_state='response_received')
+        failure.metadata['http_status']=status
+        raise failure
 
     def models(self):
         try:
@@ -106,16 +131,16 @@ class Provider:
         """Check the identity of the transport that will actually generate."""
         expected=self.config.get('model_digest') or (os.getenv('FRONTIER_MODEL_DIGEST','unverified') if self.slot=='primary' else 'unverified')
         if expected!='unverified' and model!=self.config['model']:
-            raise ValueError('digest를 고정한 검증 배포에서는 반증 모델도 기본 모델과 같아야 합니다.')
+            raise ModelServiceError('digest를 고정한 검증 배포에서는 반증 모델도 기본 모델과 같아야 합니다.',
+                transport=self.config['protocol'],operation='model-identity',category='model_identity',retryable=False)
         if expected!='unverified' and self.config['protocol']=='ollama':
             self._operation='/api/tags'
             response=self.client.get(self.base+'/api/tags')
-            if response.status_code==429 or response.status_code>=500:
-                raise ModelServiceError(f'모델 확인 서버 일시 오류 ({response.status_code})',
-                    transport='ollama',operation='/api/tags')
-            response.raise_for_status()
-            actual=next((m.get('digest') for m in response.json().get('models',[]) if m.get('name')==model),None)
-            if actual!=expected:raise ValueError('로컬 모델 digest가 조사 시작 시 고정한 값과 다릅니다. 새 사건에서 버전을 확인하세요.')
+            self.check_http_status(response,'/api/tags')
+            actual=next((m.get('digest') for m in self.response_json(response,'/api/tags').get('models',[]) if m.get('name')==model),None)
+            if actual!=expected:
+                raise ModelServiceError('로컬 모델 digest가 조사 시작 시 고정한 값과 다릅니다. 새 사건에서 버전을 확인하세요.',
+                    transport=self.config['protocol'],operation='model-identity',category='model_identity',retryable=False)
         return {'transport':self.config['protocol'],'model':model,'expected_digest':expected}
 
     def generate(self,question,pack,role='analyst'):

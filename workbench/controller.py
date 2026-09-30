@@ -23,6 +23,7 @@ class Controller:
         self.wake=threading.Event()
         self.stop=threading.Event()
         self.model_lock=threading.Lock()
+        self.report_finalization_lock=threading.Lock()
         from .runtime_contract import code_identity
         self.runtime_code=code_identity()
         from .procedures import snapshot
@@ -141,7 +142,8 @@ class Controller:
                 epoch=self.store.get(c['epoch_id'])
             else:
                 epoch=self.store.add('epoch',case_id,status='running',max_jobs=64,jobs=0,started_at=now())
-            c=self.store.update(case_id,status='running',epoch_id=epoch['id'],model_wait=None)
+            c=self.store.update(case_id,status='running',epoch_id=epoch['id'],model_wait=None,model_wait_by_transport={},
+                ended_at=None,end_reason=None,report_snapshot_request=None)
             self.store.audit(case_id,'epoch_started',epoch_id=epoch['id'])
         self.wake.set();return c
 
@@ -154,6 +156,9 @@ class Controller:
         version=WINDOWS_VERSION if platform=='windows' else VERSION
         scan_action='windows_scan' if platform=='windows' else 'linux_scan'
         investigate_action='windows_investigate' if platform=='windows' else 'linux_investigate'
+        configs=self.store.list('config');provider=configs[-1].get('provider',{}) if configs else {}
+        policies={k:provider.get(k,default) for k,default in
+            (('second_review_policy','always'),('review_queue_policy','question-priority-v1'))}
         for evidence in self.store.list('evidence',case_id):
             supported=WINDOWS_EXTENSIONS if platform=='windows' else ('.e01','.raw','.dd','.img')
             if not evidence.get('connected',True) or Path(evidence['path']).suffix.lower() not in supported:continue
@@ -171,7 +176,7 @@ class Controller:
                 upstream=next((t for t in self.store.list('task',case_id) if t['evidence_id']==evidence['id'] and t['action']==scan_action and not t.get('superseded')),None)
                 revision=[upstream['id'],upstream.get('retry_generation',0)] if upstream and action!=scan_action else None
                 fingerprint=hashlib.sha256(json.dumps([evidence['id'],evidence['signature'],action,version,revision]).encode()).hexdigest()
-                task=self.store.add('task',case_id,evidence_id=evidence['id'],cell_id=cell['id'],action=action,label=label,phase=phase,status='queued',attempts=0,fingerprint=fingerprint,depth=0,analysis_version=version,review_policy='autonomous-v1',target_os=platform)
+                task=self.store.add('task',case_id,evidence_id=evidence['id'],cell_id=cell['id'],action=action,label=label,phase=phase,status='queued',attempts=0,fingerprint=fingerprint,depth=0,analysis_version=version,review_policy='autonomous-v1',target_os=platform,**policies)
                 self.store.db.execute('INSERT INTO fingerprints VALUES(?,?,?)',(case_id,fingerprint,task['id']))
             evidence_tasks=[t for t in self.store.list('task',case_id) if t['evidence_id']==evidence['id'] and not t.get('superseded')]
             for report_task in evidence_tasks:
@@ -190,7 +195,9 @@ class Controller:
             c=self.store.get(case_id,'case')
             if c['status']=='running':
                 active=any(t['status']=='running' or (t['status']=='queued' and t.get('worker_job_key')) for t in self.store.list('task',case_id)) or any(j['status']=='submitted' for j in self.store.list('investigation_job',case_id))
-                self.store.update(case_id,status='pause_requested' if active else 'paused')
+                self.store.update(case_id,status='pause_requested' if active else 'paused',
+                    end_reason='user_paused',
+                    report_snapshot_request={'token':'manual-pause:'+now(),'reason':'user_paused'})
             self.store.audit(case_id,'pause_requested')
         return self.store.get(case_id)
 
@@ -293,10 +300,14 @@ class Controller:
                 'test_intents':data['test_intents']},inputs)
             return data
 
-    def finish(self,case_id,epoch,status):
-        self.store.update(epoch['id'],status=status,ended_at=now())
-        self.store.update(case_id,status=status)
-        self.store.audit(case_id,'epoch_ended',status=status)
+    def finish(self,case_id,epoch,status,reason=None):
+        ended=now()
+        reason=reason or ('queued_work_completed' if status=='complete' else 'no_runnable_work' if status=='quiescent' else None)
+        self.store.update(epoch['id'],status=status,ended_at=ended,end_reason=reason)
+        self.store.update(case_id,status=status,ended_at=ended,end_reason=reason)
+        self.store.audit(case_id,'epoch_ended',status=status,reason=reason,epoch_id=epoch['id'])
+        from .terminal_reports import request
+        request(self,case_id,epoch['id']+':'+ended,reason)
 
     def expand(self,case_id,parent_task):
         """One bounded deterministic recipe. No agent can recursively invoke itself."""
@@ -343,7 +354,7 @@ class Controller:
                 self.finish(case_id,epoch,status);return False
             age=(datetime.now(timezone.utc)-datetime.fromisoformat(epoch['started_at'])).total_seconds()
             if epoch['jobs']>=epoch['max_jobs'] or age>21600:
-                self.finish(case_id,epoch,'resource_limit');return False
+                self.finish(case_id,epoch,'resource_limit','job_limit' if epoch['jobs']>=epoch['max_jobs'] else 'runtime_limit');return False
             task=queued[0];e=self.store.get(task['evidence_id'])
             continuing=bool(task.get('started_at')) and task['action'] in ('linux_investigate','windows_investigate','ai_judgment') or bool(task.get('worker_job_key')) or bool(task.get('worker_waiting'))
             self.store.update(task['id'],status='running',attempts=task['attempts']+(0 if continuing else 1),started_at=task.get('started_at') or now())
@@ -456,6 +467,12 @@ class Controller:
                         with self.store.tx():
                             self.store.update(c['id'],status='paused')
                             self.store.audit(c['id'],'controller_error',error=str(ex))
+                from .terminal_reports import process
+                # No new analysis/model work, even when the report task is
+                # still queued behind an exhausted execution budget.
+                try:progress=process(self,c['id']) or progress
+                except Exception as ex:
+                    self.store.audit(c['id'],'terminal_report_dispatch_error',error=str(ex))
             if not progress:self.wake.wait(1);self.wake.clear()
 
     def pack(self,case_id,question=''):

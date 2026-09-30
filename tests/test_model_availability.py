@@ -39,7 +39,9 @@ def test_wrong_digest_still_fails_closed(monkeypatch):
     p=Provider(CONFIG);p.client.close()
     p.client=httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(200,json={'models':[]})))
     with pytest.raises(ValueError,match='digest') as caught:p.generate('q',{})
-    assert not isinstance(caught.value,ModelServiceError)
+    assert isinstance(caught.value,ModelServiceError)
+    assert caught.value.category=='model_identity' and caught.value.metadata['retryable'] is False
+    assert caught.value.metadata['request_attempted'] is False
     assert p.client.is_closed
 
 
@@ -76,6 +78,71 @@ def test_recovery_clears_wait_without_fabricating_findings(tmp_path):
     availability.recovered(c.store,cid)
     assert not availability.waiting(c.store,cid)
     assert not c.store.list('judgment',cid)
+
+
+@pytest.mark.parametrize('status,category',[(401,'model_authentication'),(403,'model_authentication'),
+    (400,'model_request_configuration'),(404,'model_request_configuration'),(422,'model_request_configuration')])
+def test_http_rejection_is_not_an_invalid_evidence_interpretation(status,category,monkeypatch):
+    monkeypatch.delenv('FRONTIER_MODEL_DIGEST',raising=False)
+    p=Provider(CONFIG);p.client.close()
+    p.client=httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(status,json={'error':'private credential fixture'})))
+    with pytest.raises(ModelServiceError) as caught:p.generate('q',{})
+    assert caught.value.category==category and caught.value.metadata['retryable'] is False
+    assert caught.value.metadata['request_attempted'] is True
+    assert caught.value.metadata['delivery_state']=='response_received'
+    assert 'private credential' not in str(caught.value)
+
+
+def test_nonretryable_configuration_failure_pauses_immediately(tmp_path):
+    c,cid,e,t,o=setup(tmp_path)
+    ex=ModelServiceError('configuration rejected',transport='fixture',operation='prepare',
+        category='model_request_configuration',retryable=False)
+    receipt=availability.defer(c.store,cid,t,ex)
+    state=c.store.get(cid)['model_wait']
+    assert state['circuit_open'] and state['retry_at'] is None
+    assert c.store.get(cid)['status']=='paused'
+    assert receipt['failure_category']=='model_request_configuration'
+    assert not c.store.list('review_diagnostic',cid)
+
+
+@pytest.mark.parametrize('status',[200,302])
+def test_transport_html_or_redirect_is_not_a_bad_evidence_interpretation(status,monkeypatch):
+    monkeypatch.delenv('FRONTIER_MODEL_DIGEST',raising=False)
+    p=Provider(CONFIG);p.client.close();seen=[]
+    def reply(request):
+        seen.append(request)
+        return httpx.Response(status,text='<html>login or protocol error</html>',headers={'Location':'https://invalid.example'})
+    p.client=httpx.Client(transport=httpx.MockTransport(reply),follow_redirects=False)
+    with pytest.raises(ModelServiceError) as caught:p.generate('q',{})
+    assert caught.value.category==('model_transport_protocol' if status==200 else 'model_request_configuration')
+    assert caught.value.metadata['retryable'] is False and len(seen)==1
+
+
+def test_other_parallel_transport_cannot_clear_the_outage(tmp_path):
+    c,cid,e,t,o=setup(tmp_path)
+    ex=ModelServiceError('offline',transport='fixture',operation='chat')
+    ex.metadata['transport_identity']='endpoint-a'
+    availability.defer(c.store,cid,t,ex)
+    availability.recovered(c.store,cid,'endpoint-b')
+    availability.recovered(c.store,cid)
+    assert availability.waiting(c.store,cid)
+    availability.recovered(c.store,cid,'endpoint-a')
+    assert not availability.waiting(c.store,cid)
+
+
+def test_two_outages_keep_separate_counters_and_recovery(tmp_path):
+    c,cid,e,t,o=setup(tmp_path)
+    for identity in ('endpoint-a','endpoint-b','endpoint-a'):
+        ex=ModelServiceError('offline',transport='fixture',operation='chat')
+        ex.metadata['transport_identity']=identity
+        availability.defer(c.store,cid,t,ex)
+    state=c.store.get(cid)['model_wait_by_transport']
+    assert state['endpoint-a']['consecutive_failures']==2 and state['endpoint-b']['consecutive_failures']==1
+    availability.recovered(c.store,cid,'endpoint-a')
+    assert availability.waiting(c.store,cid)
+    assert c.store.get(cid)['model_wait']['transport_identity']=='endpoint-b'
+    availability.recovered(c.store,cid,'endpoint-b')
+    assert not availability.waiting(c.store,cid)
 
 
 def test_two_connections_validate_routes_and_bind_runtime():

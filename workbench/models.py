@@ -52,6 +52,8 @@ class ProviderConfig(ModelConnection):
     # opt into two independent dossier requests; the global scheduler still
     # caps all model requests at two.
     review_concurrency: int = Field(default=1, ge=1, le=2, strict=True)
+    second_review_policy: Literal['always','conditional-v1'] = 'always'
+    review_queue_policy: Literal['question-priority-v1','returned-first-v1'] = 'question-priority-v1'
     investigator: Literal['native'] = 'native'
     investigation_strategy: Literal['guided','baseline'] = 'guided'
     secondary: ModelConnection | None = None
@@ -220,11 +222,25 @@ class SourceMetadataChoice(Strict):
 SourceChoice = Annotated[SourceExcerptChoice | SourceMetadataChoice,Field(discriminator='mode')]
 
 
+class ExplanationProposal(Strict):
+    question_id: str = Field(default='',max_length=100,
+        description='Supplied current question ID; empty only for a case-root follow-up.')
+    explanation: str = Field(min_length=1,max_length=700,
+        description='A new possible explanation, not an established fact or a verdict. A trigger does not prove this explanation.')
+    discriminating_question: str = Field(min_length=1,max_length=300)
+    trigger_observation_ids: list[str] = Field(min_length=1,max_length=8)
+    next_discriminator: str = Field(min_length=1,max_length=500,
+        description='What observation would distinguish this explanation from the current alternatives; not a promise of execution.')
+
+
 class JudgmentReport(Strict):
     summary: str = Field(min_length=1, max_length=1200)
     findings: list[JudgmentFinding] = Field(min_length=1, max_length=10)
     next_checks: list[JudgmentCheck] = Field(default_factory=list,max_length=4)
     check_assessments: list[CheckAssessment] = Field(default_factory=list,max_length=12)
+    explanation_proposals: list[ExplanationProposal] = Field(default_factory=list,max_length=3,
+        description='Optional NEW competing explanations prompted by these presented sources. [] is valid. '
+            'Keep triggering evidence separate from supporting evidence; do not restate existing hypotheses or require a minimum count.')
     excerpt_selections: list[ExcerptSelection] = Field(default_factory=list,
         description='Working pages only: select exact evidence-bearing excerpts from cited sources for later comparison. Preserve decisive context and contrary evidence; omitted text stays unrepresented, never disproved. Omit a source from this list to keep its entire presented excerpt.')
     source_metadata_selections: list[SourceMetadataSelection] = Field(default_factory=list,

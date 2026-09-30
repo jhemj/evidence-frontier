@@ -37,6 +37,15 @@ def resolved(pack):
     return result
 
 
+def comparison_cost(pack):
+    """Like-for-like cost after every reversible sharing pass; never clipping."""
+    from .review_context import model_view_breakdown
+    value=deepcopy(pack)
+    try:fit(value,1)
+    except InputBudgetError:pass
+    return model_view_breakdown(value)
+
+
 def references(output):
     """Every explicit evidentiary reference, not only headline citations."""
     result = []
@@ -392,6 +401,22 @@ def prepare(store, cid, stream_id):
                     for f in previous.get('findings',[])]}
         if pending.get('focus_of'):
             pack['review_stream']['selection_budget_characters']=pending['focus_budget_chars']
+            # Source selection alone cannot cure a growing derived notebook or
+            # mandatory contract floor. Show measured old components, without
+            # repeating the old assessment or clipping its unresolved context.
+            previous_page=store.get(pending['focus_of'])
+            sizing=deepcopy(stream);sizing['maximum']=10**12
+            try:previous_cost=comparison_cost(reduction_pack(sizing,[previous_page],final=False))
+            except InputBudgetError:previous_cost=None
+            pack['review_stream']['comparison_budget']={
+                'maximum_characters':stream['maximum']-stream.get('feedback_reserve',0),
+                'planning_target_characters':pending['focus_budget_chars'],
+                'previous_selected_comparison':previous_cost,
+                'instruction':'The budget includes the NEW working note, selected sources, contracts and context. '
+                    'Reduce duplicated stage prose as well as source size; [] stages is valid when unnecessary. '
+                    'Retain all material contrary facts and unresolved discriminators. Components are measured '
+                    'serialized costs, not tokens or guaranteed independent savings. If the mandatory floor '
+                    'cannot fit, state the input limitation; do not invent absence or drop a contract.'}
             pack['review_stream']['instruction']=(
                 'The previous combined source selection exceeded the bounded comparison context. '
                 'Reread this ORIGINAL page and choose the smallest sufficient sources for each narrow proposition, '
@@ -427,21 +452,15 @@ def focus_budget_errors(store,meta,pack,output,selected):
     candidate={**page,'pack':pack,'selected_pack':selected,'output':output,
         'included_ids':[o['id'] for o in resolved(pack)['observations']],
         'receipt_id':'pending-validation','objection_ids':[o['id'] for o in stream['open_objections']]}
+    before_cost=after_cost=None
     try:
         reduced=reduction_pack(stream,[candidate],final=False)
-        from .review_context import model_view_size
-        def compact_size(value):
-            # Force every reversible metadata sharing pass for a like-for-like
-            # marginal-cost comparison. Never trim source or contract fields.
-            value=deepcopy(value)
-            try:fit(value,1)
-            except InputBudgetError:pass
-            return model_view_size(value)
-        after=compact_size(reduced)
+        after_cost=comparison_cost(reduced);after=after_cost['transport_total']
         if after>page['focus_budget_chars']:
             previous=store.get(page['focus_of'])
             sizing=deepcopy(stream);sizing['maximum']=10**12
-            before=compact_size(reduction_pack(sizing,[previous],final=False))
+            before_pack=reduction_pack(sizing,[previous],final=False)
+            before_cost=comparison_cost(before_pack);before=before_cost['transport_total']
             if after>=before:
                 raise InputBudgetError(f'Source reselection made no measured progress: {before} -> {after} characters; target {page["focus_budget_chars"]}')
         # A strict reduction is not a final fit guarantee. Only one focus pass
@@ -450,6 +469,8 @@ def focus_budget_errors(store,meta,pack,output,selected):
     except InputBudgetError as exc:
         cited=set(references(output))
         return [{'code':'focus_selection_over_budget','maximum_characters':page['focus_budget_chars'],
+                 'comparison_cost_before':before_cost,
+                 'comparison_cost_after':after_cost,
                  'selected_source_sizes':[{'observation_id':o['id'],
                     'characters_before_shared_metadata':len(json.dumps(o,ensure_ascii=False,separators=(',',':')))}
                     for o in selected['observations'] if o['id'] in cited],

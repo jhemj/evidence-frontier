@@ -32,31 +32,13 @@ def review_revision(dossiers, source_ids):
     small so the controller/checkpoint coordinator can use the same freshness
     predicate without importing synthesis internals.
     """
-    wanted=set(source_ids)
-    rows=[]
-    for dossier in dossiers:
-        finding=dossier.get('finding') or {}
-        ids=set(dossier.get('observation_ids', [])+finding.get('observation_ids', [])+finding.get('counterevidence_ids', []))
-        ids.update(i for o in finding.get('open_objections',[]) for i in o.get('observation_ids',[]))
-        if ids & wanted:
-            rows.append((dossier.get('id'),dossier.get('status'),dossier.get('revision',0),finding))
-    from .review_stream import fingerprint
-    return fingerprint(sorted(rows,key=lambda row:str(row[0])))
+    from .judgment_snapshot import review_revision as revision
+    return revision(dossiers,source_ids)
 
 
 def current_view(rows, *, dossiers=None):
-    latest={}
-    for row in rows:latest[(row.get('task_id'),row.get('generation'),row['hypothesis_id'])]=row
-    result=[]
-    for row in latest.values():
-        if dossiers is not None and row.get('review_revision'):
-            related=[d for d in dossiers if d.get('task_id')==row['task_id'] and d.get('generation',0)==row.get('generation',0)]
-            if review_revision(related,row.get('source_ids',[]))!=row['review_revision']:
-                row={**row,'status':'review_changed','incident_assessment':None,'finding':{**row['finding'],
-                    'judgment':'미확인','title':'재검토 대기 · '+row['finding']['title'],
-                    'reason':'관련 단서의 검토 결과가 바뀌어 이전 종합을 재검토해야 합니다. 이전 해석: '+row['finding']['reason']}}
-        result.append(row)
-    return result
+    from .judgment_snapshot import current_synthesis
+    return current_synthesis(rows,dossiers=dossiers)
 
 
 def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=False):
@@ -233,7 +215,7 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
             try:
                 output,metadata=consult(store.list('config')[-1]['provider'],
                     '현재 질문을 원문과 경쟁 설명에 대조하세요. 필요하면 판별 가능한 다음 검사를 제안하고, 가설을 사실로 전제하지 마세요. 분할 페이지는 중간 검토입니다.',pack,role='synthesis',provider_factory=Provider)
-                model_availability.recovered(store,cid)
+                model_availability.recovered(store,cid,metadata.get('transport_identity'))
                 presented={o['id']:o for o in validation_pack['observations']}
                 issues=errors(output,[h['id']],ids,{h['id']:ids},presented,
                     require_literals=task.get('review_policy')=='autonomous-v1',canonical_observations=obs)
@@ -327,6 +309,10 @@ def tick(controller,cid,evidence,task,dossiers,*,dynamic_only=False,incremental=
             source_ids=source_ids,source_revision=dependency,review_revision=dossier_revision,
             checkpoint_revision=checkpoint_revision,incremental=bool(incremental),
             followup_dossier_id=followup_id)
+        if status in ('reviewed','objections_open'):
+            from .explanation_proposals import adopt as adopt_explanations
+            adopt_explanations(store,cid,task,evidence,output,record['id'],ids,
+                pack.get('question_context',{}).get('questions',[]))
         if h.get('hypothesis_kind') == 'dynamic':
             from .hypothesis_ledger import apply as apply_hypothesis
             finding_judgment = finding.get('judgment', '미확인')

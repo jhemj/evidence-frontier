@@ -254,3 +254,19 @@ def test_preparation_failure_is_not_a_luna_request(tmp_path,monkeypatch):
     row=manifest['transports'][0]
     assert row['transport']=='request-preparation'
     assert row['request_attempted'] is False and row['request_sha256'] is None
+
+
+def test_entered_adapter_does_not_claim_model_delivery(tmp_path,monkeypatch):
+    from workbench.provider import ModelServiceError
+    def offline(*args):
+        raise ModelServiceError('discovery unavailable',transport='fixture',operation='cli-discovery',
+            phase='discovery',category='model_service_discovery',delivery_state='not_sent')
+    monkeypatch.setattr(driver,'infer',offline)
+    driver.install_assisted_provider(tmp_path)
+    p=Provider({'base_url':'http://127.0.0.1:11434','model':'fixture'})
+    with pytest.raises(ModelServiceError):p.generate('q',{},role='judgment')
+    row=json.loads((tmp_path/'assisted-e2e-manifest.json').read_text())['transports'][0]
+    assert row['adapter_entered'] is True and row['request_sha256']
+    assert row['request_attempted'] is False and row['delivery_state']=='not_sent'
+    assert row['phase']=='discovery' and row['failure_category']=='model_service_discovery'
+    assert row['transport_identity'] and 'usage' not in row

@@ -28,13 +28,15 @@ def refresh(controller, cid, evidence, task):
     hypotheses=[h for h in store.list('hypothesis',cid) if h.get('evidence_id')==evidence['id']
                 and h.get('hypothesis_kind')=='dynamic' and not h.get('superseded')
                 and in_current_scope(h)]
+    candidates=[h for h in store.list('hypothesis_proposal',cid) if h.get('evidence_id')==evidence['id']
+        and h.get('status')=='candidate' and in_current_scope(h)]
     claims=[c for c in store.list('claim',cid) if c.get('task_id')==task['id']]
     objections=[o for o in store.list('objection',cid) if o.get('task_id')==task['id']
                 and o.get('generation',0)==task.get('retry_generation',0) and o.get('status')=='open']
     roots=[{'id':cid+':'+evidence['id'], 'source_kind':'case_question',
             'question':store.get(cid).get('question') or '제공한 증거로 확인 가능한 사건 경과와 조사 한계는 무엇인가?',
             'observation_ids':[]}]
-    memory=case_memory.sync(store,cid,task,evidence,observations,hypotheses+roots,objections,claims)
+    memory=case_memory.sync(store,cid,task,evidence,observations,roots+hypotheses+candidates,objections,claims)
     rows=memory['questions']
     from .scenarios import project as scenario_projection
     scenarios=scenario_projection({'task':list(tasks.values()),'evidence':[evidence],
@@ -76,7 +78,7 @@ def view(memory, limit=4):
     rows=memory['questions'][:limit]
     result={'corpus_revision':memory['corpus_revision'], 'total':len(memory['questions']),
         'omitted':max(0,len(memory['questions'])-len(rows)),
-        'questions':[{k:q.get(k) for k in ('id','question','source_kind','source_ids','status','version',
+        'questions':[{k:q.get(k) for k in ('id','business_question_id','parent_question_id','definition_revision','question','source_kind','source_ids','status','version',
                 'dependency_revision','observation_ids','investigation_priority','priority_reason','working_state')} for q in rows],
         'instruction':'Focus on unresolved questions and strongest alternatives. Coverage categories are not hypotheses. '
             'Propose new hypotheses naturally; do not manufacture ten conclusions. Each tool should name question_id '

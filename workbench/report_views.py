@@ -102,6 +102,9 @@ def project(document):
     status=completion.get('label','조사 상태 미등록')
     if not completion.get('execution_terminated'):status='조사 진행 중 — 기준시각 현재'
     if completion.get('execution_exit')=='user_paused':status='사용자 요청으로 중단 · 현재까지의 부분 결과'
+    if completion.get('execution_exit')=='model_service':status='AI 연결·설정 확인을 위해 일시정지 · 현재까지의 부분 결과'
+    if completion.get('execution_exit')=='paused':status='실행 일시정지 · 중단 사유 미제공 · 현재까지의 부분 결과'
+    if completion.get('execution_exit')=='pause_requested':status='일시정지 처리 중 · 아직 작업 종료 미확인'
     if completion.get('execution_exit')=='budget':status='예산 한도로 실행 종료 · 분석 공백 확인 필요'
     scope=(f"검토 단위 {completion.get('review_units',0)}개 중 미검토 {completion.get('unreviewed_units',0)}개. "
         f"미실행 검사 {d.get('check_ledger',{}).get('not_executed',0)}개, 결과 미평가 계약 {d.get('check_ledger',{}).get('unassessed_contracts',0)}개. "

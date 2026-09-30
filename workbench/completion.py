@@ -67,31 +67,46 @@ def project(document, review_inputs):
         for family,counts in o['fields'].get('coverage_map',{}).get('families',{}).items():
             sources.append({'evidence_id':o['evidence_id'],'family':family,**counts})
     statuses=[t.get('status') for t in document['coverage'] if t.get('action')!='investigation_report']
-    terminated=bool(statuses) and not any(s in ('queued','running') for s in statuses)
+    case_status=document.get('case',{}).get('status')
+    # Queued work remains queued after a budget stop. Coverage is not the
+    # execution lifecycle and must not keep a stopped case 'running'.
+    terminated=(case_status in ('complete','completed','quiescent','resource_limit','paused','failed','error')
+                if case_status is not None else bool(statuses) and not any(s in ('queued','running') for s in statuses))
     unreviewed=sum(d['status']!='reviewed' for d in units)
+    question_refs={i for q in document.get('case_questions',[]) if q.get('status') in ('open','reopened','held')
+                   for i in q.get('observation_ids',[])}
+    obligations=[d for d in units if d['status']!='deferred'
+        or question_refs.intersection(d.get('observation_ids',[]))]
+    unfinished_obligations=sum(d['status']!='reviewed' for d in obligations)
     open_objections={o['id'] for d in units for o in (d.get('finding') or {}).get('open_objections',[])}
     open_objections.update(o['id'] for o in document.get('objections',[]) if o['status']=='open')
     ledger=document['check_ledger']
-    gaps=any(s not in ('covered','covered_zero') for s in statuses) or unreviewed or open_objections or ledger['not_executed'] or ledger['unassessed_contracts']
+    gaps=not statuses or any(s not in ('covered','covered_zero') for s in statuses) or unfinished_obligations or open_objections or ledger['not_executed'] or ledger['unassessed_contracts']
     gaps=gaps or any(s['status']!='reviewed' or s.get('selection_is_partial') for s in document.get('case_synthesis',[]))
     gaps=gaps or any(not s.get('complete',False) for s in windows_sources)
     frontier=document.get('investigation_frontier',{})
     questions=document.get('case_questions',[])
     open_questions=sum(q.get('status') in ('open','reopened','held') for q in questions)
     gaps=gaps or open_questions
-    gaps=gaps or frontier.get('open_leads',0) or frontier.get('deferred_discovery',0)
+    # New projections distinguish an admitted investigation obligation from a
+    # literal candidate. Legacy frontiers without the contract stay qualified.
+    gaps=gaps or frontier.get('unfinished_obligations',
+        frontier.get('open_leads',0) or frontier.get('deferred_discovery',0))
     intents=document.get('test_intents',[])
     feasible=[i for i in intents if i.get('admission',{}).get('eligible') is True
         and i.get('assessment_status')!='assessed']
     blocked=[i for i in intents if i.get('admission',{}).get('eligible') is False]
     gaps=gaps or bool(feasible)
-    case_status=document.get('case',{}).get('status')
-    execution_exit=('user_paused' if case_status in ('paused','pause_requested') else
+    stop_reason=(document.get('execution_closure') or {}).get('reason') or document.get('case',{}).get('end_reason')
+    execution_exit=('pause_requested' if case_status=='pause_requested' else
+        'model_service' if case_status=='paused' and stop_reason in ('model_service_circuit','model_configuration') else
+        'user_paused' if case_status=='paused' and stop_reason=='user_paused' else
+        'paused' if case_status=='paused' else
         'budget' if case_status=='resource_limit' else
         'error' if case_status in ('failed','error') or any(s=='failed' for s in statuses) and terminated else
         'normal' if terminated else 'running')
     return {'execution_terminated':terminated,'analysis_complete_in_supported_scope':terminated and not gaps,
-        'execution_exit':execution_exit,
+        'execution_exit':execution_exit,'execution_stop_reason':stop_reason,
         'supported_scope_review':'complete' if terminated and not gaps else 'partial' if ids or units else 'unknown',
         'feasible_unfinished_tests':[i['id'] for i in feasible],
         'capability_or_input_blocked_tests':[{'id':i['id'],'reason':i['admission']['reason'],
@@ -112,6 +127,9 @@ def project(document, review_inputs):
                               'exact_span_ids_basis':'prepared, not evaluated or whole-file byte coverage',
                               'scope_basis':'prepared/transmitted/valid-assessed lifecycle; source spans only when evidence_presentation manifest is present'},
         'judgment_cited_observations':len(judged),'review_units':len(units),'unreviewed_units':unreviewed,
+        'review_obligations':len(obligations),'unfinished_review_obligations':unfinished_obligations,
+        'inventory_not_reviewed':sum(d['status']=='deferred' and d not in obligations for d in units),
+        'inventory_limit':'Unreviewed candidates remain unknown; they are not automatically obligations or harmless findings.',
         'untriaged_deferred_units':sum(d.get('status')=='deferred' for d in units),
         'reviewed_context_units':sum(d.get('status')=='reviewed' and d.get('disposition')=='reviewed_context' for d in units),
         'open_objections':len(open_objections),
@@ -129,10 +147,13 @@ def materials(document):
     for intent in document.get('test_intents',[]):
         admission=intent.get('admission') or {}
         if admission.get('eligible') is not False:continue
-        design=admission['design']
-        rows.append({'category':'unavailable_or_unsupported' if admission['reason']=='capability_intent_mismatch' else 'input_availability_unverified',
-            'material':design['immediate_observable'],'blocked_conclusion':design.get('expected_update',''),
-            'action':'기존 자료·도구로 가능한 대체 검사를 먼저 확인. 중요한 판별 자료만 묶어서 사용자에게 요청.',
+        design=admission.get('design') or {}
+        internal=admission.get('reason') in ('unsupported_tool','capability_intent_mismatch','required_input_unavailable')
+        rows.append({'category':'internal_test_blocked' if internal else 'input_availability_unverified',
+            'material':design.get('immediate_observable','미제공'),'blocked_conclusion':design.get('expected_update',''),
+            'action':'기존 자료·도구의 검사 능력·원장 참조·입력 조건을 내부에서 수정하고 대체 검사를 설계. 외부 자료 필요를 뜻하지 않습니다.' if internal else
+                '실제 미확보 자료와 질문의 결속을 확인한 뒤 사용자에게 요청.',
+            'user_action_required':False if internal else None,
             'reference':intent['id'],'question_id':intent.get('question_id'),
             'missing_observation_ids':admission.get('missing_observation_ids',[])})
     for check in document['check_ledger']['checks']:

@@ -53,6 +53,18 @@ def test_snapshot_refs_and_content_versions():
     assert b['narrative'][0]['refs'][0]['version']==b['objects']['claim:C1']['version']
 
 
+@pytest.mark.parametrize('status',['resource_limit','complete','quiescent'])
+def test_execution_end_comes_from_current_epoch_not_analysis_inference(status):
+    rows=records();rows[0].update(status=status,epoch_id='EP-current')
+    rows.extend([{'kind':'epoch','id':'EP-current','case_id':'CASE-demo','status':status,
+                  'ended_at':'2026-01-02T00:00:00Z'},
+                 {'kind':'epoch','id':'EP-old','case_id':'CASE-demo','ended_at':'2025-01-01T00:00:00Z','end_reason':'old'}])
+    view=validate(make(rows));end=view['case']['execution_end']
+    assert end['status']==status and end['ended_at']=='2026-01-02T00:00:00Z'
+    assert end['reason'] is None # Do not manufacture the unrecorded limit type.
+    assert view['summary']['unassessed_tests']==1
+
+
 def test_cross_case_and_generation_fail_closed():
     rows=records();rows.append({**rows[3], 'id':'BAD','case_id':'other'})
     with pytest.raises(ValueError,match='Cross-case'):make(rows)
@@ -132,6 +144,275 @@ def test_report_manifest_scope_and_missing_report():
     r=make(rows)['reports'][0]
     assert r['freshness']=='older_scope' and r['correction_impact']=='possible'
     assert r['claim_versions'] is None
+
+
+def test_high_visibility_stage_is_not_free_model_statement():
+    rows=records();source=rows[3]
+    source['fields']['command']='query status'
+    rows.append({'kind':'dossier','id':'D','case_id':'CASE-demo','task_id':'T1','evidence_id':'E1',
+        'status':'reviewed','finding':{'title':'Product attack confirmed','card_summary':'Actor definitely succeeded',
+            'observation_ids':['O1'],'timeline_role':'핵심','reason':'Compare execution with normal maintenance.',
+            'fact_assertions':[{'observation_id':'O1','pointer':'/fields/command','operator':'equals','value':'query status'}],
+            'stages':[{'stage':'execution','statement':'Product attack confirmed','observation_ids':['O1']}],
+            'incident_relevance':{'level':'direct','reason':'This recorded command is relevant, success unverified.'}}})
+    view=validate(make(rows))
+    stage=view['objects']['claim:D:stage:0']
+    assert 'Product attack confirmed' not in stage['title']
+    assert stage['interpretation']=='Product attack confirmed'
+    assert 'query status' in view['narrative'][0]['text']
+    assert view['timeline'][0]['core'] and 'query status' in view['timeline'][0]['title']
+
+
+def test_report_claim_versions_use_same_canonical_bindings_and_detect_correction():
+    from workbench.judgment_snapshot import claim_version
+    rows=records();claim=rows[4]
+    saved={'claim:C1':claim_version(claim,claim,{'O1':rows[3]})}
+    rows.append({'kind':'report','id':'R','case_id':'CASE-demo','report_id':'REPORT-demo',
+        'snapshot':{'scope_revision':9,'claim_versions':saved}})
+    view=make(rows)
+    assert view['objects']['claim:C1']['canonical_version']==saved['claim:C1']
+    assert view['reports'][0]['correction_impact']=='none_for_included_claims'
+    rows[4]['text']='Corrected narrow description'
+    changed=make(rows,sequence=2)['reports'][0]
+    assert changed['correction_impact']=='confirmed' and changed['changed_claim_keys']==['claim:C1']
+
+
+def test_business_questions_group_contexts_without_merging_answers():
+    rows=records();rows[5]['business_question_id']='BUSINESS-root'
+    rows.append({**rows[5],'id':'Q2','state':'held','status':'held'})
+    view=validate(make(rows));q=view['objects']['question:BUSINESS-root']
+    assert len(q['contexts'])==2 and q['state']=='contextual'
+    assert q['test_keys']==['test:TEST1']
+    assert view['summary']['questions']==1
+
+
+def test_current_hypothesis_requires_full_dependency_verification_and_scoped_sources(tmp_path):
+    from workbench.scenarios import dependency
+    from scripts.observer_snapshot import scenario_source_current
+    rows=records();o=rows[3]
+    h={'kind':'hypothesis','id':'H','case_id':'CASE-demo','created_at':'2026-01-01T02:00:00Z',
+       'hypothesis_kind':'dynamic','task_id':'T1','evidence_id':'E1','generation':0,
+       'title':'Record has an authorized explanation','card_summary':'An explanation, not a verified actor.',
+       'supporting_evidence_ids':['O1'],'refuting_evidence_ids':[],
+       'scenario_assessment':{'comparison_question':'Was the activity authorized?', 'evidence_fit':'moderate',
+            'ranking_reason':'A source-bound interpretation.','alternative_explanation':'An unauthorized activity remains possible.',
+            'next_check':'Compare actual approval records.','investigation_priority':'normal','priority_reason':'Distinguish approval.'},
+       'scenario_source_revision':dependency([o],{'O1'})}
+    view=make(rows+[h]);assert not view['objects']['hypothesis:H']['assessment_current']
+    dbpath=tmp_path/'sources.db'
+    with sqlite3.connect(dbpath) as db:
+        db.execute('CREATE TABLE records(id TEXT,kind TEXT,case_id TEXT,created_at TEXT,body TEXT)')
+        for r in rows+[h]:db.execute('INSERT INTO records VALUES(?,?,?,?,?)',(r['id'],r['kind'],r['case_id'],r['created_at'],json.dumps(r)))
+    before=hashlib.sha256(dbpath.read_bytes()).hexdigest()
+    actual=capture(dbpath,'CASE-demo','run')
+    assert actual['objects']['hypothesis:H']['assessment_current']
+    assert hashlib.sha256(dbpath.read_bytes()).hexdigest()==before
+    # An uncited observation of the same object invalidates the old comparison.
+    new={**o,'id':'O2','fields':{**o['fields'],'excerpt':'New contrary context'}}
+    with sqlite3.connect(dbpath) as db:
+        db.execute('INSERT INTO records VALUES(?,?,?,?,?)',(new['id'],new['kind'],new['case_id'],new['created_at'],json.dumps(new)))
+    stale=capture(dbpath,'CASE-demo','run')['objects']['hypothesis:H']
+    assert not stale['assessment_current'] and stale['freshness']=='dependency_changed'
+    assert stale['evidence_fit'] is None and stale['validity']=='historical_assessment'
+    assert stale['historical_reason']==h['scenario_assessment']['ranking_reason']
+    assert stale['historical_next_discriminator']==h['scenario_assessment']['next_check']
+    assert stale['ranking_reason'] is None and stale['next_discriminator'] is None
+
+
+def test_briefing_does_not_create_plans_strength_or_work_from_manual_selection():
+    if not NODE:pytest.skip('Node runtime unavailable')
+    script=r'''
+const assert=require('node:assert/strict'),b=require(process.argv[1]);
+const hypothesis=(id,current=true)=>({type:'hypothesis',id,key:'hypothesis:'+id,version:'v-'+id,
+  title:id,assessment_current:current,changed_at:'2026-01-01',source_keys:['observation:O1']});
+const test=id=>({type:'test',id,key:'test:'+id,question_id:'Q'+id,version:'v'+id,execution:'running',job_ids:['J'+id],
+  conditions:{success_condition:'An explicitly recorded supporting condition.',refutation_condition:'A contrary condition.',
+    inconclusive_condition:'Incomplete coverage cannot decide.'},request:{reason:'A supplied test purpose.'},
+  design:{expected_update:'A supplied expected change.',required_observation_ids:['O1']},assessment_status:'unassessed',result_scope:{complete:false}});
+const question=id=>({type:'question',id:'Q'+id,key:'question:Q'+id,hypothesis_keys:['hypothesis:'+id],test_keys:['test:'+id]});
+const a=hypothesis('A'),c=hypothesis('B'),x=test('A'),y=test('B'),qa=question('A'),qb=question('B');
+const view={case:{},objects:Object.fromEntries([a,c,x,y,qa,qb].map(o=>[o.key,o]))};
+const activity={items:[{id:'JA',state:'running',title:'A',purpose:'Actual job purpose.'}]};
+const saved=JSON.stringify([view,activity]);
+let ctx=b.context({view,current:view,activity,available:true,selectedKey:null});
+assert.equal(ctx.active.key,a.key);assert.equal(ctx.primary.key,a.key);assert.equal(ctx.test.key,x.key);
+ctx=b.context({view,current:view,activity,available:true,selectedKey:c.key});
+assert.equal(ctx.active.key,a.key);assert.equal(ctx.primary.key,c.key);assert.equal(ctx.test.key,y.key);
+assert.equal(ctx.real.id,'JA'); // Looking at B never changes the engine's active A.
+const plan=b.testExplanation(ctx.test);
+assert.equal(plan.purpose,y.request.reason);assert.equal(plan.outcomes[0].text,y.conditions.success_condition);
+assert.equal(plan.outcomes[1].text,y.conditions.refutation_condition);assert.equal(plan.outcomes[2].text,y.conditions.inconclusive_condition);
+assert.equal(plan.assessed,false);assert.equal(plan.incomplete,true);
+assert.equal(JSON.stringify([view,activity]),saved);
+ctx=b.context({view,current:{...view,case:{execution_end:{status:'resource_limit'}}},activity,available:true});
+assert.equal(ctx.active,undefined);assert.equal(ctx.real,null);assert.match(b.testExplanation(x,{ended:true}).status,/지금은 진행하지/);
+ctx=b.context({view,current:{...view,case:{status:'resource_limit'}},activity,available:true});
+assert.equal(ctx.ended,true);assert.equal(ctx.real,null); // Missing end time is not live execution.
+ctx=b.context({view,current:view,activity,available:true,pinned:true});assert.equal(ctx.active,false);
+ctx=b.context({view,current:view,activity,available:false});assert.equal(ctx.real,null);assert.equal(ctx.hypotheses.length,0);
+a.assessment_current=false;ctx=b.context({view,current:view,activity,available:true});assert.equal(ctx.active,undefined);
+const missing=hypothesis('unlinked');assert.equal(b.linkedTests(missing,view).length,0);
+const unrelated={...x,key:'test:OTHER',design:{required_observation_ids:['other-file']}};
+const wideQuestion={...qa,test_keys:[x.key,unrelated.key]};
+const wideView={...view,objects:{...view.objects,[qa.key]:wideQuestion,[unrelated.key]:unrelated}};
+assert.deepEqual(b.linkedTests(a,wideView).map(t=>t.key),[x.key]);
+assert.equal(b.testExplanation(null).outcomes.length,0);
+assert.equal(b.testExplanation({...x,conditions:{}}).outcomes.length,0);
+const claim={type:'claim',key:'claim:C',validity:'adopted',source_keys:['observation:O1'],
+  title:'Malware definitely executed by a person.',interpretation:'An invented product identity.',
+  display_binding:{status:'bound',fact:{pointer:'/fields/command',value:'<img src="https://invalid.example">'}}};
+assert.equal(b.factText(claim),'기록에 명령 문자열 ‘<img src="https://invalid.example">’가 남아 있어요.');
+assert.equal(b.factText(claim).includes('definitely'),false);
+assert.equal(b.claimFor(a,{objects:{[claim.key]:claim}}),claim);
+assert.equal(b.claimFor(missing,{objects:{[claim.key]:{...claim,source_keys:['observation:OTHER']}}}),null);
+'''
+    result=subprocess.run([NODE,'-e',script,str(ROOT/'ui/observer/briefing.js')],capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+
+
+def test_main_scene_keeps_detailed_questions_and_work_in_explicit_dialogs():
+    import re
+    html=(ROOT/'ui/observer/index.html').read_text()
+    main=html.split('</main>')[0]
+    assert 'id="hypothesis-bubbles"' in main and 'id="guide-work"' in main
+    assert 'id="questions"' not in main and 'id="activity"' not in main
+    assert 'id="inspection-dialog"' in html and 'id="work-dialog"' in html
+    assert '/briefing.js' in html
+    identifiers=re.findall(r'\bid="([^"]+)"',html)
+    assert len(identifiers)==len(set(identifiers))
+    js=(ROOT/'ui/observer/observer.js').read_text()
+    assert '원문으로 확인한 좁은 사실' not in js and '좁은 주장' not in js
+    assert '이렇게 생각하나요?' in js
+    for control in ('explanation-older','explanation-newer','explanation-current','explanation-position'):
+        assert 'id="'+control+'"' in main
+    assert 'explanations.slice(0,3)' not in js
+    assert 'thought hypothesis ' in js
+
+
+def history_hypothesis():
+    scope={'task_id':'T1','evidence_id':'E1','generation':0}
+    revisions=[{'revision':i,'at':f'2026-01-01T0{i}:00:00Z',**scope,
+        'title':f'Explanation {i}', 'card_summary':f'Recorded interpretation {i}',
+        'reasoning':f'Public supporting explanation {i}', 'observation_ids':['O1'],
+        'judgment':'미확인','lifecycle':'investigating',
+        'raw_output':'DO NOT EXPORT MODEL OUTPUT', 'origin_key':'DO NOT EXPORT INTERNAL KEY',
+        'scenario_assessment':{'comparison_question':'Was it approved?',
+            'alternative_explanation':'Another interpretation is possible.',
+            'next_check':'A proposed check, not a scheduled job.'}} for i in (1,2)]
+    return {'kind':'hypothesis','id':'H','case_id':'CASE-demo',**scope,
+        'created_at':'2026-01-01T01:00:00Z','updated_at':'2026-01-01T02:00:00Z',
+        'hypothesis_kind':'dynamic','title':'Explanation 2','revision':2,'revision_history':revisions,
+        'observation_ids':['O1'],'supporting_evidence_ids':['O1'],'refuting_evidence_ids':[]}
+
+
+def test_explanation_history_is_explicit_versioned_read_only_and_not_a_past_source_certificate(tmp_path):
+    rows=records()+[history_hypothesis()];dbpath=tmp_path/'history.db'
+    with sqlite3.connect(dbpath) as db:
+        db.execute('CREATE TABLE records(id TEXT,kind TEXT,case_id TEXT,created_at TEXT,body TEXT)')
+        for r in rows:db.execute('INSERT INTO records VALUES(?,?,?,?,?)',(r['id'],r['kind'],r['case_id'],r['created_at'],json.dumps(r)))
+    view=capture(dbpath,'CASE-demo','test-run');rev=view['envelope']['projection_revision']
+    h=view['objects']['hypothesis:H'];manifest=h['explanation_history']
+    assert manifest['count']==2 and [e['revision'] for e in manifest['entries']]==[1,2]
+    assert 'Public supporting explanation 1' not in json.dumps(view)
+    before=hashlib.sha256(dbpath.read_bytes()).hexdigest()
+    with TestClient(server(tmp_path,[view],source_database=dbpath)) as c:
+        path='/api/explanations/'+rev+'/H/1'
+        response=c.get(path);assert response.status_code==200
+        data=response.json();entry=data['entry']
+        assert entry['reason']=='Public supporting explanation 1'
+        assert entry['historical'] and entry['source_freshness']=='not_certified_at_historical_revision'
+        assert data['owner_ref']=={'key':h['key'],'version':h['version']}
+        assert data['source_refs']==[{'key':'observation:O1','version':view['objects']['observation:O1']['version']}]
+        assert data['source_reference_scope']=='requested_snapshot_not_historical_source_versions'
+        assert 'DO NOT EXPORT' not in response.text
+        for suffix in ('/foreign/1','/H/0','/H/3'):
+            assert c.get('/api/explanations/'+rev+suffix).status_code==404
+        assert c.post(path).status_code==405
+        assert c.get(path,headers={'Origin':'https://invalid.example'}).status_code==403
+        assert hashlib.sha256(dbpath.read_bytes()).hexdigest()==before
+        modified=copy.deepcopy(rows[-1]);modified['revision_history'][0]['reasoning']='Corrected explanation'
+        with sqlite3.connect(dbpath) as db:db.execute('UPDATE records SET body=? WHERE id=?',(json.dumps(modified),'H'))
+        assert c.get(path).status_code==409 # Never substitute an incompatible newer history.
+    with TestClient(server(tmp_path,[make(rows)] ,source_database=dbpath)) as c:
+        assert c.get('/api/explanations/'+make(rows)['envelope']['projection_revision']+'/H/1').status_code==404
+
+
+def test_explanation_history_rejects_duplicate_or_invalid_revisions():
+    from workbench.observer_history import explanation_manifest
+    h=history_hypothesis();h['revision_history'].append(copy.deepcopy(h['revision_history'][0]))
+    with pytest.raises(ValueError,match='Invalid explanation revision'):explanation_manifest(h)
+    h=history_hypothesis();h['revision_history'][0]['revision']=True
+    with pytest.raises(ValueError,match='Invalid explanation revision'):explanation_manifest(h)
+    h=history_hypothesis();h['revision_history'][0]['evidence_id']='foreign'
+    with pytest.raises(ValueError,match='Cross-scope'):explanation_manifest(h)
+    h=history_hypothesis();h['revision_history'][0].update(task_id='previous-task',generation=7)
+    from workbench.observer_history import explanation_entries
+    assert explanation_manifest(h)['count']==2
+    previous=explanation_entries(h)[0]
+    assert previous['task_id']=='previous-task' and previous['generation']==7
+    assert explanation_manifest({'id':'empty'})['count']==0
+
+
+def test_one_explanation_at_a_time_and_history_selection_survives_new_judgment():
+    if not NODE:pytest.skip('Node runtime unavailable')
+    script=r'''
+const assert=require('node:assert/strict'),{ExplanationHistory}=require(process.argv[1]);
+const v={envelope:{case_id:'C',run_id:'R',data_mode:'replay',source_binding:'binding',projection_revision:'S'},objects:{}};
+const h={key:'hypothesis:H',id:'H',version:'owner2',changed_at:'2026-01-01T00:30:00Z',ledger_revision:2,
+  explanation_history:{version:'history2',count:2,entries:[{revision:1,at:'2026-01-01T01:00:00Z',version:'entry1'},
+    {revision:2,at:'2026-01-01T02:00:00Z',version:'entry2'}]}};
+const other={key:'hypothesis:B',id:'B',version:'B1',changed_at:'2026-01-01T00:00:00Z'};
+v.objects[h.key]=h;v.objects[other.key]=other;
+const saved=JSON.stringify(v),history=new ExplanationHistory();
+history.update(v,[h,other],h);assert.equal(history.selected.key,h.key);assert.equal(history.past,false);
+assert.equal(history.selected.at,'2026-01-01T02:00:00Z'); // Revision time, not initial object creation.
+assert.equal(history.items.length,3);const previous=history.move(1);
+assert.equal(history.selected.revision,1);assert.equal(history.selected.archived,true);assert.equal(history.past,true);
+const payload={envelope:v.envelope,owner_ref:{key:h.key,version:h.version},history_version:'history2',
+  entry:{hypothesis_id:'H',revision:1,version:'entry1',historical:true,reason:'Public saved reason'},source_refs:[]};
+assert.throws(()=>history.accept(previous,{...payload,owner_ref:{key:'wrong',version:h.version}}));
+assert.throws(()=>history.accept(previous,{...payload,envelope:{...v.envelope,run_id:'other'}}));
+assert.throws(()=>history.accept(previous,{...payload,source_refs:[{key:'missing',version:'x'}]}));
+history.accept(previous,payload);assert.equal(history.loaded().entry.reason,'Public saved reason');
+history.update(v,[h,other],h);assert.equal(history.selected.token,previous.token);assert.equal(history.items.length,3);
+const newer={...h,version:'owner3',ledger_revision:3,changed_at:'2026-01-01T03:00:00Z',
+  explanation_history:{version:'history3',count:3,entries:[...h.explanation_history.entries,
+    {revision:3,at:'2026-01-01T03:00:00Z',version:'entry3'}]}};
+history.update({...v,objects:{...v.objects,[h.key]:newer}},[newer,other],newer);
+assert.equal(history.selected.token,previous.token);assert.equal(history.selected.revision,1);
+assert.equal(history.loaded().entry.reason,'Public saved reason'); // No forced jump or replay celebration.
+assert.equal(history.move(-1).revision,2);assert.equal(history.move(-1).revision,3);assert.equal(history.past,false);
+history.move(1);history.update(v,[other],other);assert.equal(history.selected.removed,true);
+assert.equal(history.past,true);history.latest();assert.equal(history.selected.key,other.key);
+assert.throws(()=>history.update({...v,envelope:{...v.envelope,case_id:'foreign'}},[other],other));
+assert.equal(JSON.stringify(v),saved); // View navigation never mutates ledger/schedules.
+const empty=new ExplanationHistory();empty.update(v,[],null);assert.equal(empty.move(1),null);
+const single=new ExplanationHistory();single.update(v,[other],other);single.move(1);assert.equal(single.past,false);
+'''
+    result=subprocess.run([NODE,'-e',script,str(ROOT/'ui/observer/briefing.js')],capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+
+
+def test_full_source_is_versioned_read_only_paginated_and_never_an_arbitrary_file(tmp_path):
+    rows=records();rows[3]['fields']['excerpt']='<script>untrusted()</script>'+'x'*13000
+    dbpath=tmp_path/'source.db'
+    with sqlite3.connect(dbpath) as db:
+        db.execute('CREATE TABLE records(id TEXT,kind TEXT,case_id TEXT,created_at TEXT,body TEXT)')
+        for r in rows:db.execute('INSERT INTO records VALUES(?,?,?,?,?)',(r['id'],r['kind'],r['case_id'],r['created_at'],json.dumps(r)))
+    view=capture(dbpath,'CASE-demo','test-run');revision=view['envelope']['projection_revision']
+    before=hashlib.sha256(dbpath.read_bytes()).hexdigest()
+    with TestClient(server(tmp_path,[view],source_database=dbpath)) as c:
+        path='/api/sources/'+revision+'/O1'
+        a=c.get(path+'?limit=12000').json();b=c.get(path+'?offset=12000&limit=12000').json()
+        assert a['text']+b['text']==rows[3]['fields']['excerpt'] and b['next_offset'] is None
+        assert c.get('/api/sources/'+revision+'/foreign').status_code==404
+        assert c.get(path+'?offset=-1').status_code==400
+        assert c.get(path+'?limit=65537').status_code==400
+        assert hashlib.sha256(dbpath.read_bytes()).hexdigest()==before
+        with sqlite3.connect(dbpath) as db:
+            row={**rows[3],'fields':{'excerpt':'corrected'}}
+            db.execute('UPDATE records SET body=? WHERE id=?',(json.dumps(row),'O1'))
+        assert c.get(path).status_code==409
 
 
 def test_capture_is_read_only_consistent_and_excludes_prompts(tmp_path):

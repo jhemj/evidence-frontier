@@ -9,6 +9,16 @@ from workbench.review_context import fit, InputBudgetError, model_view_size
 from workbench import review_stream
 
 
+def test_transport_cost_breakdown_matches_actual_size_without_source_content():
+    from workbench.review_context import model_view_breakdown
+    pack={'observations':[{'id':'observation','fields':{'excerpt':'PRIVATE source'}}],
+          'executed_checks':[], 'page_review_notes':[{'summary':'derived note'}]}
+    original=deepcopy(pack);cost=model_view_breakdown(pack)
+    assert cost['unit']=='characters' and cost['transport_total']==model_view_size(pack)
+    assert sum(cost['components'].values())+cost['other_and_envelope']==cost['transport_total']
+    assert 'PRIVATE source' not in json.dumps(cost) and pack==original
+
+
 def fixture(tmp_path, count=100, excerpt=None):
     c,cid,e,t,original=setup(tmp_path)
     s=c.store

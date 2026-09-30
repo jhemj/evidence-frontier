@@ -114,7 +114,8 @@ def project(document, leads):
         relevant = [(c, x) for c in checks for x in c['contracts'] if x['dossier_id'] == d['id']]
         open_checks = [(c, x) for c, x in relevant if not c['job_ids'] or x['evaluation_status'] != 'assessed']
         f = d.get('finding') or {}
-        state = 'disposed' if d['status'] == 'reviewed' and not open_checks else 'investigating' if relevant else 'open'
+        state = ('inventory' if d['status']=='deferred' and not relevant else
+                 'disposed' if d['status'] == 'reviewed' and not open_checks else 'investigating' if relevant else 'open')
         rows.append({'dossier_id': d['id'], 'title': d.get('title',f.get('title','단서')), 'state': state,
                      'disposition': ('excluded' if f.get('timeline_role') == '반증됨' else 'included') if state == 'disposed' else 'pending',
                      'reason': f.get('reason') or d.get('error', ''),
@@ -129,5 +130,7 @@ def project(document, leads):
                 'reason': '' if c['key'] in admitted else 'Bounded discovery budget or source not yet available; not examined'} for c in candidates]
     return {'version': VERSION, 'leads': rows, 'discovery_inventory': backlog, 'discovery_receipts': leads,
             'open_leads': sum(r['state'] != 'disposed' for r in rows),
+            'unfinished_obligations':sum(r['state'] not in ('disposed','inventory') for r in rows),
+            'unreviewed_inventory':sum(r['state']=='inventory' for r in rows),
             'deferred_discovery': sum(r['state'] == 'deferred' for r in backlog),
             'scope': '단서·후속 검사 처리 상태. 다른 원문의 일치는 독립 증거·악성·동일 행위자 확정이 아님.'}

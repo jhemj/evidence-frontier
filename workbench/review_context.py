@@ -23,6 +23,27 @@ def model_view_size(pack):
     return len(serialize(encode(encode_text(ReferenceProjection(pack).encode(pack)))))
 
 
+def model_view_breakdown(pack):
+    """Measure the SAME transport, not raw bytes, tokens, or semantic progress.
+
+    Per-key values exclude their key/delimiter overhead; the residual includes
+    that overhead and lossless transport manifests. Values are not marginal
+    costs: sharing dependencies can change when a source selection changes.
+    No source text or model narrative is copied into these diagnostics.
+    """
+    from .model_references import ReferenceProjection
+    from .model_tables import encode
+    from .model_text import encode as encode_text
+    projected=encode(encode_text(ReferenceProjection(pack).encode(pack)))
+    components={key:len(serialize(value)) for key,value in projected.items()
+                if key in ('observations','page_review_notes','executed_checks',
+                           'question_context','open_objections','literal_fact_candidates')}
+    total=len(serialize(projected))
+    return {'unit':'characters','transport_total':total,'components':components,
+            'other_and_envelope':total-sum(components.values()),
+            'cost_kind':'serialized components; not additive marginal costs or provider tokens'}
+
+
 def bounded(value, text=800, items=6):
     if isinstance(value,str):return value[:text]
     if isinstance(value,list):return [bounded(x,text,items) for x in value[:items]]

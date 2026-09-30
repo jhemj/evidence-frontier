@@ -14,10 +14,12 @@ jobs:
         with:
           version: '0.8.15'
       - run: uv sync --frozen --all-groups --python 3.12
-      - run: uv run --frozen --all-groups pytest -q
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - run: uv run --frozen --all-groups pytest -q
+        env:
+          FRONTIER_TEST_NODE: node
       - run: node --check dist/app.js
       - run: node --check dist/progress.js
       - run: node tests/progress.test.cjs

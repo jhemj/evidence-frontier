@@ -1,0 +1,66 @@
+/* Repository-owned SVG. No SDK, canvas loop, network assets or model calls. */
+.scene .guide-intro{display:flex;flex-direction:column;gap:4px;margin:12px 0 6px}
+.scene .moa{--moa-fill:#b7def3;--moa-line:#3c617c;--moa-accent:#78b7db;display:block;width:min(230px,100%);height:auto;flex:none;margin:0;transform:none;background:none;border-radius:0;box-shadow:none}
+#moa-preview-avatar{--moa-fill:#b7def3;--moa-line:#3c617c;--moa-accent:#78b7db;width:230px;height:auto;flex:none;margin:15px auto 0;transform:none;background:none;box-shadow:none}
+#moa-preview-avatar:before{display:none}#moa-preview-dialog{width:min(560px,92vw);text-align:center}
+#moa-preview-dialog .note{text-align:left}.moa-preview-choices{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:20px}
+.scene .moa[hidden]{display:none}.scene .moa:before{display:none}.moa svg{width:100%;height:auto;overflow:visible}
+.moa[data-level=suspected]{--moa-fill:#c5b9f2;--moa-line:#66538e;--moa-accent:#9983d1}
+.moa[data-level=probable]{--moa-fill:#f2bc80;--moa-line:#8e531f;--moa-accent:#dd9048}
+.moa[data-level=confirmed]{--moa-fill:#ee929a;--moa-line:#862f3d;--moa-accent:#d05869}
+.moa[data-level=stale]{--moa-fill:#c4d0d5;--moa-line:#586b75;--moa-accent:#91a3aa}
+.moa-body{fill:var(--moa-fill);stroke:var(--moa-line);stroke-opacity:.45;stroke-width:1.5;transition:fill .7s ease,stroke .7s ease}
+.moa-highlight{fill:none;stroke:white;stroke-width:6;stroke-linecap:round;opacity:.65}
+.moa-shadow{fill:#7c8d9e;opacity:.13}.moa-arm{fill:none;stroke:var(--moa-line);stroke-width:4;stroke-linecap:round}
+.moa-eye ellipse{fill:var(--moa-line)}.moa-pupil{fill:#fff}.moa-spark{fill:#fff;opacity:.55}
+.moa-brow,.moa-mouth,.moa-mouth-thought{fill:none;stroke:var(--moa-line);stroke-width:2.5;stroke-linecap:round}
+.moa-brow,.moa-mouth-thought{display:none}.moa-brow{stroke-width:2;opacity:.6}.moa-cheek{fill:#e29aa7;opacity:.38}
+.moa-glass{display:none}.moa-glass>path,.moa-glass>circle{fill:#effbff;fill-opacity:.55;stroke:var(--moa-line);stroke-width:3}.moa-glass .moa-glass-glint{fill:none;stroke:white;stroke-width:2;opacity:.8}
+.moa-notes{display:none}.moa-notes rect{fill:#fffaf0;stroke:var(--moa-line);stroke-width:2}.moa-notes path{stroke:var(--moa-accent);stroke-width:2}
+.moa-happy-eye,.moa-mouth-happy,.moa-mouth-surprised,.moa-thought-dots,.moa-clock,.moa-pages,.moa-question,.moa-sparkles,.moa-pencil{display:none}
+.moa-happy-eye{fill:none;stroke:var(--moa-line);stroke-width:3;stroke-linecap:round}
+.moa-mouth-happy,.moa-mouth-surprised{fill:var(--moa-line)}
+.moa-thought-dots,.moa-sparkles{fill:var(--moa-accent)}
+.moa-clock circle,.moa-pages rect{fill:#fff;stroke:var(--moa-line);stroke-width:2}
+.moa-clock path,.moa-pages path,.moa-question path{fill:none;stroke:var(--moa-line);stroke-width:2;stroke-linecap:round}
+.moa-question circle{fill:var(--moa-line)}.moa-pencil path:first-child{fill:#f8e2a8;stroke:var(--moa-line);stroke-width:1.5}.moa-pencil path+path{fill:none;stroke:var(--moa-line);stroke-width:1.5}
+.moa-wait{display:none;fill:var(--moa-line);opacity:.6}.moa-creature,.moa-face,.moa-eye,.moa-pupil,.moa-hand{transform-box:fill-box;transform-origin:center}
+.moa[data-base=searching] .moa-glass{display:block}.moa[data-base=searching] .moa-pupil{transform:translate(1px,-1px)}
+.moa[data-base=thinking] .moa-mouth,.moa[data-base=concerned] .moa-mouth,.moa[data-base=offline] .moa-mouth,.moa[data-level=confirmed] .moa-mouth{display:none}
+.moa[data-base=thinking] .moa-mouth-thought,.moa[data-base=concerned] .moa-mouth-thought,.moa[data-base=offline] .moa-mouth-thought,.moa[data-level=confirmed] .moa-mouth-thought{display:block}
+.moa[data-base=thinking] .moa-brow,.moa[data-base=concerned] .moa-brow{display:block}.moa[data-base=thinking] .moa-brow.left{transform:rotate(-12deg)}
+.moa[data-base=concerned] .moa-brow.left{transform:rotate(-15deg)}.moa[data-base=concerned] .moa-brow.right{transform:rotate(15deg)}
+.moa[data-base=organizing] .moa-notes{display:block}.moa[data-base=waiting] .moa-wait{display:block}
+.moa[data-base=thinking] .moa-thought-dots,.moa[data-base=waiting] .moa-clock,.moa[data-base=working] .moa-pages,.moa[data-base=concerned] .moa-question{display:block}
+.moa[data-transient=counterpoint] .moa-thought-dots{display:none}.moa[data-transient=counterpoint] .moa-question{display:block}
+.moa[data-transient=corrected] .moa-pencil{display:block}
+.moa[data-transient=updated] .moa-mouth,.moa[data-transient=happy] .moa-mouth,.moa[data-transient=happy] .moa-eye,.moa[data-transient=happy] .moa-brow{display:none}
+.moa[data-transient=updated] .moa-mouth-surprised,.moa[data-transient=updated] .moa-sparkles,.moa[data-transient=happy] .moa-happy-eye,.moa[data-transient=happy] .moa-mouth-happy,.moa[data-transient=happy] .moa-sparkles{display:block}
+.moa[data-transient=happy] .moa-arm.left{transform:rotate(25deg);transform-origin:55px 134px}.moa[data-transient=happy] .moa-hand{transform:rotate(-25deg)}
+/* A serious scoped verdict must never be overlaid with a happy/surprised face. */
+.moa[data-level=confirmed] .moa-mouth-happy,.moa[data-level=confirmed] .moa-mouth-surprised,.moa[data-level=confirmed] .moa-happy-eye,.moa[data-level=confirmed] .moa-sparkles{display:none}
+.moa[data-level=confirmed] .moa-eye{display:block}.moa[data-level=confirmed][data-transient=happy] .moa-arm.left,.moa[data-level=confirmed][data-transient=happy] .moa-hand{transform:none}
+.moa[data-base=offline] .moa-eye,.moa[data-base=ended] .moa-eye{transform:scaleY(.75)}.moa[data-base=offline]{opacity:.75}
+.moa[data-motion=true]:not([data-base=ended]):not([data-base=offline]) .moa-creature{animation:moa-breathe 3.6s ease-in-out infinite}
+.moa[data-motion=true] .moa-eye{animation:moa-blink 6.5s ease-in-out infinite}
+.moa[data-motion=true][data-base=searching] .moa-hand{animation:moa-search 2.8s ease-in-out infinite}
+.moa[data-motion=true][data-base=thinking] .moa-pupil{animation:moa-think 4.8s ease-in-out infinite}
+.moa[data-motion=true][data-base=organizing] .moa-notes{animation:moa-notes 2.5s ease-in-out infinite}
+.moa[data-motion=true][data-base=waiting] .moa-wait{animation:moa-wait 2.5s ease-in-out infinite}
+.moa[data-motion=true][data-base=thinking] .moa-creature{animation:moa-ponder 4s ease-in-out infinite}
+.moa[data-motion=true][data-base=working] .moa-pages{animation:moa-notes 2.2s ease-in-out infinite}
+.moa[data-motion=true][data-transient=happy]:not([data-level=confirmed]) .moa-creature{animation:moa-happy 1.6s ease-in-out infinite}
+.moa[data-motion=true] .moa-sparkles{animation:moa-wait 2s ease-in-out infinite}
+.moa[data-motion=false] *, .moa[data-base=ended] *, .moa[data-base=offline] *{animation:none!important}
+.moa-verdict{text-align:center;padding:4px 0 10px}.moa-verdict>span{font-size:12px;font-weight:650}.moa-verdict .note{font-size:11px;margin:4px 0}.moa-verdict button{font-size:11px;padding:3px 8px}
+#guide-work-live{font-size:13px;font-weight:600;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+@keyframes moa-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+@keyframes moa-blink{0%,43%,47%,100%{transform:scaleY(1)}45%{transform:scaleY(.12)}}
+@keyframes moa-search{0%,100%{transform:rotate(-5deg)}50%{transform:rotate(7deg)}}
+@keyframes moa-think{0%,100%{transform:translate(0,0)}35%,60%{transform:translate(2px,-3px)}}
+@keyframes moa-notes{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes moa-wait{0%,100%{opacity:.25}50%{opacity:.8}}
+@keyframes moa-ponder{0%,100%{transform:rotate(0)}40%,65%{transform:rotate(-5deg) translateY(-2px)}}
+@keyframes moa-happy{0%,100%{transform:translateY(0)}45%{transform:translateY(-7px) rotate(3deg)}}
+@media(prefers-reduced-motion:reduce){.moa *{animation:none!important;transition:none!important}}
+@media(max-width:720px){.scene .guide-intro{margin:0;gap:0}.scene .moa{width:170px;margin:0}}

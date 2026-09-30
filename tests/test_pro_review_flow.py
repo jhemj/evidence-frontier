@@ -79,7 +79,7 @@ def test_question_admission_precedes_generic_flood_without_clearing_it():
 
 
 def test_pause_budget_and_feasible_unfinished_work_are_separate_axes():
-    doc={'case':{'status':'paused'},'observations':[],'dossiers':[],'coverage':[],
+    doc={'case':{'status':'paused','end_reason':'user_paused'},'observations':[],'dossiers':[],'coverage':[],
          'check_ledger':{'not_executed':0,'unassessed_contracts':0},
          'test_intents':[{'id':'i','admission':{'eligible':True},'status':'reserved'}]}
     out=project(doc,[])

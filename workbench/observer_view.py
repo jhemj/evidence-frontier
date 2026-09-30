@@ -120,12 +120,15 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
         return key
 
     observations = [r for r in by_kind.get('observation', []) if scoped(r)]
+    source_rows={r['id']:r for r in observations}
     for row in observations:
         f = row.get('fields', {})
+        excerpt=f.get('excerpt')
         add('observation', row['id'], {'title': f.get('path') or row.get('type') or '원문 관측',
             'source_type': row.get('type'), 'source_location': row.get('source_location'),
-            'excerpt': f.get('excerpt'), 'excerpt_characters': row.get('_excerpt_characters'),
-            'excerpt_partial': bool(row.get('_excerpt_partial') or f.get('excerpt_truncated')),
+            'excerpt': excerpt[:12000] if isinstance(excerpt,str) else excerpt,
+            'excerpt_characters': row.get('_excerpt_characters',len(excerpt) if isinstance(excerpt,str) else None),
+            'excerpt_partial': bool(row.get('_excerpt_partial') or f.get('excerpt_truncated') or isinstance(excerpt,str) and len(excerpt)>12000),
             'source_version': row.get('_source_version') or digest(row),
             'locator': {k: f.get(k) for k in ('source_sha256', 'artifact_path', 'partition_offset',
                 'inode', 'byte_offset', 'byte_length', 'source_complete')},
@@ -133,18 +136,33 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             'limitation': f.get('interpretation_limit') or '원문 존재와 행위 성공·악성 판단은 별개입니다.'}, row['id'])
 
     def claim(row, finding, identity, *, stage=False, index=None):
+        from .presentation_claims import bind
+        from .judgment_snapshot import claim_version
+        # Stage statements are interpretations, not another unvalidated banner.
+        canonical=row.get('finding') or finding
+        selected={**canonical,'observation_ids':finding.get('observation_ids',[]),
+            'fact_assertions':[a for a in canonical.get('fact_assertions',[]) if a['observation_id'] in finding.get('observation_ids',[])]}
+        try:
+            bound=bind(selected,source_rows)
+            binding=bound['display_binding']
+        except (ValueError,KeyError,TypeError):
+            bound={'title':'원문 결속 재검토 필요','card_summary':'이 주장의 표시 근거를 확인할 수 없습니다.'}
+            binding={'status':'invalid'}
         refs = list(dict.fromkeys(finding.get('observation_ids', [])))
         counters = list(dict.fromkeys(finding.get('counterevidence_ids', []) +
                                      finding.get('contradicting_observation_ids', [])))
-        admitted = (row['kind'] == 'dossier' and row.get('status') == 'reviewed' or
+        admitted = (row['kind'] in ('dossier','case_synthesis') and row.get('status') == 'reviewed' or
                     row['kind'] == 'claim' and row.get('status') == 'approved')
         invalid = row.get('status') in ('invalidated', 'retracted', 'superseded') or row.get('superseded')
         missing = [i for i in refs + counters if 'observation:' + i not in entities]
-        validity = 'invalidated' if invalid else 'unresolved_references' if missing else 'adopted' if admitted else 'candidate'
+        validity = 'invalidated' if invalid else 'unresolved_references' if missing or binding['status']=='invalid' else 'adopted' if admitted else 'candidate'
         return add('claim', identity, {
-            'title': finding.get('statement') or finding.get('text') or finding.get('title') or '표제 미제공',
-            'statement': finding.get('statement') or finding.get('text') or finding.get('card_summary') or '',
+            'title':bound['title'], 'statement':bound['card_summary'],
+            'interpretation':finding.get('statement') or finding.get('text') or finding.get('card_summary') or '',
+            'display_binding':binding,
+            'canonical_version':claim_version(row,canonical,source_rows,index if stage else None),
             'reason': finding.get('reason') or '',
+            'timeline_role':canonical.get('timeline_role'), 'relevance':canonical.get('incident_relevance') or {},
             'claim_kind': finding.get('claim_type') or ('stage_assertion' if stage else 'unclassified'),
             'validity': validity, 'judgment': finding.get('judgment') or '미평가',
             'scope': finding.get('stage') or row.get('scope_note') or '인용된 원문 범위',
@@ -152,6 +170,7 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             'gaps': finding.get('remaining_checks', []) + (row.get('falsification') or {}).get('missing_checks', []),
             'source_ids': refs, 'counter_ids': counters, 'missing_ids': missing,
             'owner_id': row['id'], 'owner_pointer': '/finding/stages/' + str(index) if stage else '/finding' if row['kind'] == 'dossier' else '/text',
+            'task_id':row.get('task_id'),'evidence_id':row.get('evidence_id'),
             'ledger_revision': row.get('revision') or len(row.get('assessment_history') or []) or None,
             'changed_at': (row.get('assessment_history') or [{}])[-1].get('at') or row.get('created_at'),
             'change_reason': finding.get('change_reason'),
@@ -172,6 +191,11 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             keys.append(claim(row, scoped_stage, row['id'] + ':stage:' + str(i), stage=True, index=i))
         if row.get('source_claim_id'):
             aliases.setdefault(row['source_claim_id'], []).extend(keys)
+    from .judgment_snapshot import current_synthesis
+    synthesis=current_synthesis([r for r in by_kind.get('case_synthesis',[]) if scoped(r)],
+        dossiers=[r for r in by_kind.get('dossier',[]) if scoped(r)])
+    for row in synthesis:
+        if row.get('finding'):claim(row,row['finding'],row['id'])
 
     jobs = [j for j in by_kind.get('investigation_job', []) if scoped(j)]
     jobs_by_test = {}
@@ -197,7 +221,14 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             execution = 'queued'
         else:
             execution = 'candidate'  # admission eligibility alone is not scheduling.
-        assessment = t.get('assessment') or {}
+        assessed=t.get('assessment_status')=='assessed'
+        # The writer uses latest_assessment. A changed physical result resets
+        # assessment_status but retains history; never display that history as
+        # the current logical outcome.
+        assessment=(t.get('latest_assessment') or t.get('assessment') or {}) if assessed else {}
+        result=t.get('result_scope') or {}
+        result_scope=result.get('scope',result)
+        if not isinstance(result_scope,dict):result_scope={}
         add('test', t['id'], {'title': t.get('tool') or (t.get('scope') or {}).get('request', {}).get('tool') or '검사',
             'execution': execution, 'admission': admission.get('eligible'),
             'execution_reason': admission.get('reason') or latest.get('error'),
@@ -205,8 +236,9 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             'assessment_status': t.get('assessment_status', 'unassessed'),
             'assessment': assessment, 'conditions': t.get('conditions') or {},
             'request': (t.get('scope') or {}).get('request', {}),
+            'changed_at':t.get('updated_at') or t.get('created_at'),
             'question_id': t.get('question_id'), 'job_ids': [j['id'] for j in linked],
-            'result_scope': {k: (t.get('result_scope') or {}).get(k) for k in ('complete', 'status', 'truncated', 'error')},
+            'result_scope': {k: result_scope.get(k) for k in ('complete', 'status', 'truncated', 'error')},
             'source_keys': ['observation:' + i for i in (t.get('result_scope') or {}).get('observation_ids', []) if 'observation:' + i in entities],
             'design': (t.get('scope') or {}).get('test_design') or {},
         }, t['id'])
@@ -214,35 +246,84 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
     for h in by_kind.get('hypothesis', []):
         if not scoped(h) or h.get('hypothesis_kind') != 'dynamic':
             continue
+        from .scenarios import accepted, dependency
+        from .judgment_snapshot import review_revision
+        support=h.get('supporting_evidence_ids',[]);refute=h.get('refuting_evidence_ids',[])
+        try:assessment=accepted(h.get('scenario_assessment'),support,refute)
+        except ValueError:assessment=None
+        # Minimal capture explicitly verifies uncited object dependencies. A
+        # partial source list alone must never certify a hypothesis as current.
+        source_current=h.get('_scenario_source_current')
+        if '_scenario_source_current' not in h and ledger_position.get('observation_scope')=='all canonical observations':
+            originals=[{k:v for k,v in o.items() if k not in ('_source_version','_excerpt_characters','_excerpt_partial')} for o in observations]
+            source_current=bool(h.get('scenario_source_revision')==dependency(originals,set(support+refute)))
+        review_current=True
+        if h.get('scenario_review_revision'):
+            ds=[d for d in by_kind.get('dossier',[]) if d.get('task_id')==h.get('task_id') and d.get('generation',0)==h.get('generation',0)]
+            review_current=h['scenario_review_revision']==review_revision(ds,h.get('scenario_review_source_ids',[]))
+        from .hypothesis_ledger import current_scope
+        from .observer_history import explanation_manifest
+        fresh=bool(assessment and source_current is True and review_current and
+                   set(support+refute)<=set(source_rows) and current_scope(h,tasks,active))
         add('hypothesis', h['id'], {'title': h.get('title') or h.get('text'),
             'statement': h.get('card_summary'), 'judgment': h.get('judgment'),
+            'reason':h.get('reasoning') or '', 'assessment_current':fresh,
+            'freshness':'current' if fresh else 'dependency_changed' if source_current is False or not review_current else 'unverified',
+            'evidence_fit':assessment['evidence_fit'] if fresh else None,
+            'ranking_reason':assessment['ranking_reason'] if fresh else None,
+            'next_discriminator':assessment['next_check'] if fresh else None,
+            'historical_reason':assessment['ranking_reason'] if assessment else None,
+            'historical_next_discriminator':assessment['next_check'] if assessment else None,
+            'lifecycle':h.get('lifecycle'), 'task_id':h.get('task_id'),'evidence_id':h.get('evidence_id'),
+            'generation':h.get('generation',0),
+            'changed_at':h.get('updated_at') or h.get('created_at'),
             'scope': (h.get('scenario_assessment') or {}).get('comparison_question') or '비교 질문 미제공',
             'counterarguments': [(h.get('scenario_assessment') or {}).get('alternative_explanation', '')],
             'gaps': h.get('remaining_checks', []), 'last_change': h.get('lifecycle'),
-            'validity': 'historical_assessment',
-            'review_recency': '원장 해석 · 의존성 최신성은 이 재생 화면에서 별도 입증하지 않음',
-            'source_keys': ['observation:' + i for i in h.get('observation_ids', []) if 'observation:' + i in entities],
+            'validity': 'adopted' if fresh else 'historical_assessment',
+            'review_recency': '근거·검토 의존성이 일치하는 AI 해석 · 침해 확정과 별개' if fresh else '보존된 해석 · 현재 비교 판단으로 사용할 수 없음',
+            'source_keys': ['observation:' + i for i in dict.fromkeys(h.get('observation_ids', [])+support+refute) if 'observation:' + i in entities],
             'ledger_revision': h.get('revision'),
+            'explanation_history': h.get('_explanation_history') or (explanation_manifest(h) if 'revision_history' in h else None),
         }, h['id'])
+    for h in by_kind.get('hypothesis_proposal',[]):
+        if scoped(h) and h.get('status')=='candidate':
+            add('hypothesis',h['id'],{'title':h.get('explanation'),'statement':h.get('next_discriminator'),
+                'judgment':'미확인','scope':h.get('question'),'counterarguments':[], 'gaps':[],
+                'validity':'candidate','parent_question_id':h.get('parent_question_id'),
+                'source_keys':['observation:'+i for i in h.get('triggering_evidence_ids',[]) if 'observation:'+i in entities],
+                'review_recency':'생성된 조사 후보 · 계기는 지지 근거나 실행 계획이 아님'},h['id'])
 
     decisions = {r['id']: r for r in by_kind.get('decision_revision', [])}
-    for q in by_kind.get('case_question', []):
-        if not scoped(q):
-            continue
+    groups={}
+    for q in by_kind.get('case_question',[]):
+        if scoped(q) and q.get('status')!='superseded':groups.setdefault(q.get('business_question_id') or q['id'],[]).append(q)
+    for identity,contexts in groups.items():
+        q=contexts[-1]
         decision = decisions.get(q.get('decision_id'), {})
-        keys = [key for sid in q.get('source_ids', []) for key in aliases.get(sid, [])]
-        tests = [e['key'] for e in entities.values() if e['type'] == 'test' and e['question_id'] == q['id']]
-        add('question', q['id'], {'title': q.get('question') or '질문 문구 미제공',
-            'state': q.get('state') or q.get('status') or 'unknown',
-            'answer': decision.get('reason') or '현재 범위의 답이 아직 기록되지 않았습니다.',
+        keys = list(dict.fromkeys(key for c in contexts for sid in c.get('source_ids',[]) for key in aliases.get(sid,[])))
+        if q.get('source_kind')=='case_question':
+            keys=list(dict.fromkeys(keys+[e['key'] for e in entities.values() if e['type']=='claim'
+                and any(e.get('task_id')==c.get('task_id') and e.get('evidence_id')==c.get('evidence_id') for c in contexts)]))
+        ids={c['id'] for c in contexts}
+        tests = [e['key'] for e in entities.values() if e['type'] == 'test' and e['question_id'] in ids]
+        proposals=[e['key'] for e in entities.values() if e['type']=='hypothesis' and e.get('parent_question_id')==identity]
+        add('question',identity, {'title': q.get('question') or '질문 문구 미제공',
+            'source_kind':q.get('source_kind'),
+            'state':'contextual' if len(contexts)>1 else q.get('state') or q.get('status') or 'unknown',
+            'contexts':[{'id':c['id'],'evidence_id':c.get('evidence_id'),'state':c.get('status'),
+                'answer':decisions.get(c.get('decision_id'),{}).get('reason')} for c in contexts],
+            'answer':'증거·작업 문맥별 답을 확인하세요. 서로 다른 범위의 판단을 하나로 합치지 않았습니다.' if len(contexts)>1 else
+                decision.get('reason') or '현재 범위의 답이 아직 기록되지 않았습니다.',
             'decision_id': decision.get('id'), 'decision_version': digest(decision) if decision else None,
+            'business_question_id':q.get('business_question_id'), 'parent_question_id':q.get('parent_question_id'),
             'claim_keys': [key for key in keys if entities[key]['type'] == 'claim'],
-            'hypothesis_keys': [key for key in keys if entities[key]['type'] == 'hypothesis'],
+            'hypothesis_keys':list(dict.fromkeys([key for key in keys if entities[key]['type']=='hypothesis']+proposals)),
             'test_keys': tests,
-            'source_keys': ['observation:' + i for i in q.get('observation_ids', []) if 'observation:' + i in entities],
+            'source_keys':list(dict.fromkeys('observation:'+i for c in contexts for i in c.get('observation_ids',[]) if 'observation:'+i in entities)),
             'next_test_state': 'recorded' if any(entities[k]['execution'] in ('candidate', 'queued', 'running', 'blocked') for k in tests) else 'not_selected',
             'unlinked_source_ids': [sid for sid in q.get('source_ids', []) if sid not in aliases],
-        }, q['id'])
+        },identity)
 
     receipts = by_kind.get('receipt', [])
     by_reservation = {r.get('reservation_id'): r for r in receipts if r.get('reservation_id')}
@@ -250,10 +331,16 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
     activities = []
     for j in jobs:
         terminal = j.get('status') in ('received', 'ingested')
-        state = (j.get('result_status') or 'unknown') if terminal else 'running' if j.get('worker_status') == 'running' else 'waiting'
+        state = (j.get('result_status') or 'unknown') if terminal else 'failed' if j.get('status') in ('failed','rejected') else 'running' if j.get('worker_status') == 'running' else 'waiting' if j.get('dispatched_at') else 'queued'
+        start=j.get('started_at') or j.get('dispatched_at')
+        request=j.get('request') or {}
+        target=(request.get('query') or request.get('path')) if request.get('tool')=='search' else (request.get('path') or request.get('query'))
         activities.append({'id': j['id'], 'kind': 'tool', 'title': (j.get('request') or {}).get('tool') or '도구',
-            'state': state, 'target': (j.get('request') or {}).get('path') or (j.get('request') or {}).get('query') or '범위는 검사 상세 참조',
+            'purpose':(j.get('request') or {}).get('reason'),
+            'state': state, 'target': target or '범위는 검사 상세 참조',
             'at': j.get('ended_at') or j.get('dispatched_at') or j.get('created_at'), 'error': j.get('error'),
+            'timer_at':start if state in ('running','waiting') else None,
+            'timer_origin':'execution' if j.get('started_at') else 'dispatch' if start else None,
             'task_id': j.get('task_id'), 'result_adopted': j.get('status') == 'ingested'})
     for r in by_kind.get('model_reservation', []) + by_kind.get('review_input', []) + by_kind.get('synthesis_input', []):
         if not scoped(r):
@@ -267,6 +354,8 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
             'state': model_state,
             'target': r.get('activity_target') or r.get('purpose') or '구조화 판단',
             'at': (receipt or {}).get('created_at') or r.get('created_at'), 'error': error,
+            'timer_at':r.get('created_at') if model_state=='input_registered' else None,
+            'timer_origin':'input_registered' if model_state=='input_registered' else None,
             'task_id': r.get('task_id'), 'result_adopted': None})
     for t in tasks.values():
         if t.get('status') == 'running' and not any(a['task_id'] == t['id'] and a['state'] in ('running', 'waiting') for a in activities):
@@ -292,6 +381,20 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
                         'kind': 'reuses_physical_result', 'new_execution': use.get('new_execution'),
                         'independent_evidence': use.get('independent_evidence'), 'job_id': use.get('job_id')})
 
+    from .observer_incident import current_assessments
+    assessments, incident_pending = current_assessments(by_kind.get('case_synthesis',[]),tasks,active,
+        source_rows,by_kind.get('dossier',[]),
+        complete_sources=ledger_position.get('observation_scope')=='all canonical observations')
+    for row in assessments:
+        a=row['assessment']
+        add('incident',row['id'],{'title':a['scope'],'scope':a['scope'],'statement':a['summary'] or a['rationale'],
+            'reason':a['rationale'],'verdict':a['verdict'],'validity':'adopted','assessment_current':True,
+            'changed_at':row['created_at'],'source_keys':['observation:'+i for i in row['source_ids']],
+            'limitation':'해당 질문 범위의 침해 판단입니다. 전체 사건의 확률·정상 판정이 아닙니다.'})
+    levels={'suspected':1,'probable':2,'confirmed':3}
+    leading=max((e for e in entities.values() if e['type']=='incident' and e['verdict'] in levels),
+        key=lambda e:levels[e['verdict']],default=None)
+
     # Resolve every displayed reference to an exact version in the same envelope.
     for e in entities.values():
         keys = e.get('source_keys', []) + e.get('claim_keys', []) + e.get('hypothesis_keys', []) + e.get('test_keys', [])
@@ -301,13 +404,20 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
     for observation in observations:
         for t in time_assertions(observation):
             key = 'observation:' + observation['id']
-            times.append({**t, 'source_ref': {'key': key, 'version': entities[key]['version']},
+            related=[e for e in entities.values() if e['type']=='claim' and key in e.get('source_keys',[]) and e['validity']=='adopted']
+            core=[e for e in related if e.get('timeline_role') in ('핵심','반증됨') or e.get('relevance',{}).get('level') in ('direct','indirect')]
+            representative=next((e for e in core+related if e['display_binding']['status']=='bound'),None)
+            times.append({**t,'core':bool(core), 'title':representative['title'] if representative else '원문 시각 · 해석은 상세에서 확인',
+                          'explanation':representative['statement'] if representative else entities[key]['limitation'],
+                          'relevance_reason':(representative or {}).get('relevance',{}).get('reason') or (representative or {}).get('reason'),
+                          'source_ref': {'key': key, 'version': entities[key]['version']},
                           'claim_refs': [{'key': e['key'], 'version': e['version']} for e in entities.values()
                                          if e['type'] == 'claim' and key in e.get('source_keys', [])]})
     times.sort(key=lambda t: (not t['comparable'], min(map(int, t['normalized_ns'])) if t['comparable'] else 0, t['id']))
     adopted = [e for e in entities.values() if e['type'] == 'claim' and e['validity'] == 'adopted']
     # One ledger stage, not three repeated summary/interpretation bubbles.
-    representative = next((e for e in adopted if e['claim_kind'] == 'stage_assertion'), next(iter(adopted), None))
+    representative = next((e for e in adopted if e['display_binding']['status']=='bound' and e.get('timeline_role')=='핵심'),
+        next((e for e in adopted if e['display_binding']['status']=='bound'),next(iter(adopted),None)))
     narrative = [{'kind': 'adopted_claim', 'text': e['statement'] or e['title'],
                   'limitations': e['gaps'], 'refs': [{'key': e['key'], 'version': e['version']}],
                   'dedupe_key': e['key'], 'validity': e['validity']} for e in [representative] if e]
@@ -318,17 +428,34 @@ def project(records, *, case_id, run_id, data_mode, captured_at, ledger_position
     for r in by_kind.get('report', []):
         snap = r.get('snapshot') or {}
         comparable_revision = source_revision is not None and snap.get('scope_revision') is not None
+        saved=snap.get('claim_versions')
+        current_versions={k:e.get('canonical_version') for k,e in entities.items() if e['type']=='claim' and e['validity']=='adopted'}
+        changed=[k for k,v in saved.items() if current_versions.get(k)!=v] if isinstance(saved,dict) else None
         reports.append({'id': r['id'], 'report_id': r.get('report_id'), 'generated_at': r.get('created_at'),
             'snapshot': snap, 'formats': r.get('distributed_files') or {},
             'freshness': 'same_ledger_scope' if comparable_revision and snap['scope_revision'] == source_revision else 'older_scope' if comparable_revision else 'unknown',
-            'claim_versions': None, 'claim_version_limitation': '기존 보고서의 객체별 버전 목록은 미제공입니다.',
-            'status': 'generated', 'correction_impact': 'possible' if comparable_revision and snap['scope_revision'] != source_revision else 'unknown'})
-    body = {'case': {'id': case_id, 'name': case.get('name'), 'status': case.get('status')},
+            'claim_versions':saved, 'changed_claim_keys':changed,
+            'claim_version_limitation':'사용한 주장 버전 '+str(len(saved))+'개' if isinstance(saved,dict) else '기존 보고서의 객체별 버전 목록은 미제공입니다.',
+            'status':'generated', 'correction_impact':'confirmed' if changed else 'none_for_included_claims' if changed==[] else
+                'possible' if comparable_revision and snap['scope_revision']!=source_revision else 'unknown'})
+    epoch=next((r for r in by_kind.get('epoch',[]) if r['id']==case.get('epoch_id')), {})
+    ended=case.get('ended_at') or epoch.get('ended_at')
+    end_reason=case.get('end_reason') or epoch.get('end_reason')
+    terminal=case.get('status') in ('resource_limit','complete','completed','quiescent','failed')
+    body = {'case': {'id': case_id, 'name': case.get('name'), 'status': case.get('status'),
+                    'execution_end': {'status':case.get('status'),'reason':end_reason,
+                        'ended_at':ended,'epoch_id':case.get('epoch_id')} if terminal else None},
             'objects': entities, 'relations': relations, 'timeline': times, 'narrative': narrative,
             'activity': {'checked_at': captured_at, 'items': activities, 'eta': None,
                          'eta_reason': '원장에 비교 가능한 작업량·소요시간 기준이 제공되지 않아 산정할 수 없습니다.'},
             'reports': reports,
-            'summary': {'adopted_claims': len(adopted), 'questions': sum(e['type'] == 'question' for e in entities.values()),
+            'report_finalizations':[{k:r.get(k) for k in ('id','status','reason','source_revision','report_record_id','error','ended_at')}
+                                    for r in by_kind.get('report_finalization',[])],
+            'summary': {'intrusion':{'verdict':leading['verdict'] if leading else 'undetermined',
+                'leading_ref':{'key':leading['key'],'version':leading['version']} if leading else None,
+                'pending':incident_pending,'assessed_scopes':len(assessments),
+                'metric_kind':'explicit_scoped_assessment_not_probability'},
+                'adopted_claims': len(adopted), 'questions': sum(e['type'] == 'question' for e in entities.values()),
                 'unassessed_tests': sum(e['type'] == 'test' and e['assessment_status'] == 'unassessed' for e in entities.values()),
                 'missing_reference_claims': sum(e['type'] == 'claim' and e['validity'] == 'unresolved_references' for e in entities.values()),
                 'last_meaningful_change': max((e.get('changed_at') or '' for e in adopted), default=None) or None,
@@ -352,6 +479,10 @@ def validate(view):
     if digest(body) != env['projection_revision']:
         raise ValueError('Projection hash mismatch')
     objects = view['objects']
+    ref=view.get('summary',{}).get('intrusion',{}).get('leading_ref')
+    if ref and (objects.get(ref['key'],{}).get('version')!=ref['version'] or
+                objects[ref['key']].get('type')!='incident'):
+        raise ValueError('Incompatible intrusion reference')
     for obj in objects.values():
         if digest({k: v for k, v in obj.items() if k != 'version'}) != obj['version']:
             raise ValueError('Object hash mismatch')

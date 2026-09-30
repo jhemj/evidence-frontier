@@ -26,7 +26,7 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self';
 FORMATS = {'executive.html', 'executive.docx', 'analyst.html', 'analyst.docx'}
 
 
-def create_app(snapshot_files=(), *, static_root=None, report_root=None, live_source=None):
+def create_app(snapshot_files=(), *, static_root=None, report_root=None, live_source=None, source_database=None):
     views = [validate(json.loads(Path(p).read_text())) for p in snapshot_files]
     if not views and not live_source:
         raise ValueError('At least one snapshot is required')
@@ -105,6 +105,62 @@ def create_app(snapshot_files=(), *, static_root=None, report_root=None, live_so
         return Response(data, media_type='application/octet-stream',
                         headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
+    @app.get('/api/sources/{revision}/{observation_id}')
+    def source(revision:str,observation_id:str,offset:int=0,limit:int=12000):
+        # Explicit selected observation and exact version, never arbitrary paths,
+        # raw-image extraction, a model request, or source URL access.
+        view=live_source.snapshot(revision) if live_source else versions.get(revision)
+        if not source_database or not view or view['envelope']['data_mode']=='example':raise HTTPException(404)
+        selected=view['objects'].get('observation:'+observation_id)
+        if not selected:raise HTTPException(404)
+        if offset<0 or not 1<=limit<=65536:raise HTTPException(400,'Invalid character range')
+        import sqlite3
+        from workbench.observer_view import digest
+        with sqlite3.connect(Path(source_database).resolve(strict=True).as_uri()+'?mode=ro',uri=True) as db:
+            db.execute('PRAGMA query_only=ON');db.execute('BEGIN')
+            result=db.execute('SELECT body FROM records WHERE id=? AND kind=? AND case_id=?',
+                (observation_id,'observation',view['envelope']['case_id'])).fetchone()
+            if not result:raise HTTPException(404)
+            original=json.loads(result[0])
+            if digest(original)!=selected['source_version']:raise HTTPException(409,'Source version changed; resynchronize')
+            text=original.get('fields',{}).get('excerpt')
+            if not isinstance(text,str):raise HTTPException(404,'Retained text field unavailable')
+            return {'source_version':selected['source_version'],'observation_id':observation_id,
+                'offset_characters':offset,'text':text[offset:offset+limit],'retained_characters':len(text),
+                'next_offset':offset+limit if offset+limit<len(text) else None,
+                'retained_field_only':True,'original_file_complete':original.get('fields',{}).get('source_complete')}
+
+    @app.get('/api/explanations/{revision}/{hypothesis_id}/{entry_revision}')
+    def explanation(revision: str, hypothesis_id: str, entry_revision: int):
+        view=live_source.snapshot(revision) if live_source else versions.get(revision)
+        if not source_database or not view or view['envelope']['data_mode']=='example':raise HTTPException(404)
+        selected=view['objects'].get('hypothesis:'+hypothesis_id)
+        manifest=(selected or {}).get('explanation_history')
+        if not manifest or entry_revision<1:raise HTTPException(404)
+        descriptor=next((r for r in manifest['entries'] if r['revision']==entry_revision),None)
+        if not descriptor:raise HTTPException(404)
+        import sqlite3
+        from workbench.observer_history import explanation_entries, explanation_manifest
+        with sqlite3.connect(Path(source_database).resolve(strict=True).as_uri()+'?mode=ro',uri=True) as db:
+            db.execute('PRAGMA query_only=ON');db.execute('BEGIN')
+            result=db.execute("SELECT body FROM records WHERE id=? AND case_id=? AND kind='hypothesis'",
+                (hypothesis_id,view['envelope']['case_id'])).fetchone()
+            if not result:raise HTTPException(404)
+            original=json.loads(result[0])
+            if (original.get('hypothesis_kind')!='dynamic' or
+                any(original.get(k)!=selected.get(k) for k in ('task_id','evidence_id')) or
+                original.get('generation',0)!=selected.get('generation',0) or
+                explanation_manifest(original)!=manifest):
+                raise HTTPException(409,'Explanation history changed; resynchronize')
+            entry=next(e for e in explanation_entries(original) if e['revision']==entry_revision)
+            # These refs identify source versions in the requested snapshot,
+            # NOT the source contents/freshness at the historical explanation.
+            refs=[{'key':'observation:'+i,'version':view['objects']['observation:'+i]['version']}
+                for i in entry['observation_ids'] if 'observation:'+i in view['objects']]
+            return {'envelope':view['envelope'],'owner_ref':{'key':selected['key'],'version':selected['version']},
+                'history_version':manifest['version'],'entry':entry,'source_refs':refs,
+                'source_reference_scope':'requested_snapshot_not_historical_source_versions'}
+
     app.mount('/', StaticFiles(directory=static_root or ROOT / 'ui' / 'observer', html=True), name='observer')
     return app
 
@@ -134,4 +190,4 @@ if __name__ == '__main__':
                             case_id=args.case_id, run_id=args.run_id, source_binding=args.source_binding,
                             cache_dir=args.observer_cache, interval=args.interval)
     import uvicorn
-    uvicorn.run(create_app(args.snapshot or (), report_root=args.report_root, live_source=live), host='127.0.0.1', port=args.port)
+    uvicorn.run(create_app(args.snapshot or (),report_root=args.report_root,live_source=live,source_database=args.database),host='127.0.0.1',port=args.port)

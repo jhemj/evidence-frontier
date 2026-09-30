@@ -1,0 +1,43 @@
+/* Neutral workspace surfaces; evidence warnings and Moa's verdict colors stay semantic. */
+:root{--ink:#292d33;--sub:#68707a;--green:#4b5563;--line:#dfe2e6;--paper:#fff;--wash:#f3f4f6}
+button:hover{background:#f0f1f3}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline-color:#718096}
+.topbar{background:#25282e;color:#f5f6f7}
+.brand-mark{background:#e0e3e7;color:#363c44}
+.edition{border-color:#69717d}
+.topbar .muted{color:#bec4cd}
+.topbar button{background:#393e47;border-color:#515864}
+.subbar{background:#e9ebee;border-color:#d9dde2}
+.tag,.badge{background:#e9ecf0;color:#48515e}
+.badge.warn{background:#f6edd6;color:var(--amber)}
+.badge.error{background:#f7e3df;color:var(--red)}
+.eyebrow{color:#7a828e}
+.qbutton.active{background:#edf0f4;border-color:#bbc3ce}
+.qbutton .qnum,.group h3,.thought h3{color:#68727f}
+.entity-button{background:#f8f9fa}
+.entity-button.selected{background:#edf0f4}
+.empty{background:#f6f7f8;border-color:#d8dde3}
+.selection{border-top-color:#9ca6b4}
+.excerpt{background:#f0f2f5}
+.activity-item{border-bottom-color:#ebedf0}
+.time-card{background:#fff;border-top-color:#9ca6b4}
+.time-card.file{border-top-color:#ac9870}
+.uncertain-time .time-card{background:#f7f8fa;border-top-color:#a5adb8}
+dialog::backdrop{background:#24272d66}
+.bubble{background:#f0f2f5;border-color:#dce1e7}
+.bubble:before{border-bottom-color:#dce1e7}
+.explanation-nav{background:#f5f6f8}
+.scene.reading-past .explanation-nav{background:#f5f2e9;border-color:#d9cba8}
+.current-work .badge{background:#e9ecf0}
+.thought{background:#f4f5f7;border-color:#dce1e7}
+.thought.active{background:#edf0f4;border-color:#8793a4;box-shadow:0 5px 18px #2731420c}
+.thought.viewing{border-color:#7e8c9f;box-shadow:0 4px 14px #2731420c}
+.thought.inactive{background:#f6f7f8;border-color:#e4e7eb;color:#7b838e}
+.thought.inactive>strong,.thought.inactive h3{color:#7b838e}
+.thought.inactive:hover{border-color:#b3bcc8}
+.thought.fact,.thought.reason{background:#f3f5f8;border-color:#dce2e9}
+.thought .thought-link,.thought .source-link{border-color:#d5dce5}
+.outcome{border-left-color:#a0aab8}
+.outcome.counter{border-color:#b8966e}
+.outcome.unknown{border-color:#a2aab5}
+.next-discriminator{background:#fafbfc;border-color:#c8d0db}

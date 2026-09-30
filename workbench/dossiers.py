@@ -328,8 +328,11 @@ def _prepare_queue(controller,cid,evidence,task):
         if admit(controller,cid,evidence,task):
             batches=[b for b in store.list('dossier_batch',cid) if belongs(b,task)]
     indexed_dossiers={d['id']:d for d in store.list('dossier',cid) if belongs(d,task)}
+    from .review_policy import returned_rank
+    intents=store.list('test_intent',cid)
     queue=sorted((b for b in batches if b['status'] not in terminal),
-        key=lambda b:question_engine.batch_priority(b,memory['questions'],indexed_dossiers))
+        key=lambda b:((returned_rank(b,intents),) if task.get('review_queue_policy')=='returned-first-v1' else ())
+            +question_engine.batch_priority(b,memory['questions'],indexed_dossiers))
     return task,memory,batches,queue
 
 
@@ -588,7 +591,7 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             output,receipt=consult(provider_config,
                 '기본 점검 영역과 단서 각각을 독립적으로 검토하세요. 같은 자료의 반복을 독립 근거로 세지 마세요. '
                 '가장 타당한 설명·반대 근거·확인 가능한 다음 검사를 작성하세요. 제공된 각 dossier_id당 하나의 판단이 필요합니다.',pack,role='judgment',provider_factory=Provider)
-            model_availability.recovered(store,cid)
+            model_availability.recovered(store,cid,receipt.get('transport_identity'))
             issues=validation_errors(output,batch['dossier_ids'],ids,allowed_by_dossier,presented_observations,
                 require_literals=task.get('review_policy')=='autonomous-v1',canonical_observations=all_obs)
             from .review_validation import check_errors
@@ -666,6 +669,8 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
             output=objection_ledger.qualify(output,objection_ledger.current(store,cid,task,batch['dossier_ids']))
             if stream_meta:review_stream.complete(store,stream_meta,r['id'])
             from .card_evolution import assessment_revision
+            from .explanation_proposals import adopt as adopt_explanations
+            adopt_explanations(store,cid,task,evidence,output,r['id'],ids,memory['questions'])
             for finding in output['findings']:
                 dossier=store.get(finding['dossier_id'])
                 store.update(dossier['id'],assessment_history=assessment_revision(dossier,finding,r['id']))
@@ -722,13 +727,17 @@ def _finish_one(controller,cid,evidence,task,batch_id=None,prepared=None):
                 job=store.add('investigation_job',cid,task_id=task['id'],evidence_id=evidence['id'],fingerprint=fingerprint,
                     generation=task.get('retry_generation',0),request=call,dossier_ids=[call['hypothesis_id']],contracts=[contract(call)],purpose='dossier_falsification',source_run=source_run,status='admitted',review_family=family_name,test_intent_ids=[intent['id']])
                 jobs.append(job);lifetime_jobs.append(job);admitted.append(job['id'])
+            from .review_policy import second_pass
+            needs_second=second_pass(task,output,pack,batch)
+            store.update(batch['id'],second_review_policy=task.get('second_review_policy','always'),
+                second_review_required=needs_second,second_review_basis='Current accepted findings, source selection, objections and returned contracts')
             if admitted:
                 store.update(batch['id'],status='await_checks',job_ids=list(dict.fromkeys(batch['job_ids']+admitted)),deferred_checks=deferred)
             elif any(a.get('evaluation_status')=='unassessed' for a in output.get('check_assessments',[])) and batch['round']<MAX_ROUNDS-1:
                 store.update(batch['id'],status='pending',round=batch['round']+1,attempts=0,deferred_checks=deferred,
                     validation_feedback={'errors':[{'code':'missing_check_assessment'}],
                         'instruction':'Assess every executed logical contract. Execution status is not a hypothesis verdict. Do not rerun the same physical job.'})
-            elif batch['round']==0 and not is_repair(task):
+            elif batch['round']==0 and not is_repair(task) and needs_second:
                 store.update(batch['id'],status='pending',round=1,attempts=0,validation_feedback=None,blind_assessment=output)
             else:
                 from .judgment import bound_absence

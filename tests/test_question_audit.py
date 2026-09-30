@@ -21,7 +21,8 @@ def test_recoverable_critical_items_are_not_all_unknown_questions():
         {'observation_ids':['unavailable'],'recoverable':False}],
         'accepted_claim_annotations':[{'correct':True},{'correct':False}]}
     out=audit(rows,oracle)['analyst_oracle_metrics']
-    assert out['critical_recall']==1 and out['claim_precision']==0.5
+    assert out['critical_recall'] is None and out['claim_precision']==0.5
+    assert out['critical_citation_coverage']==1
 
 
 def test_transport_failures_without_usage_do_not_hide_metered_requests():

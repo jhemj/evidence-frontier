@@ -117,6 +117,24 @@ class Store:
           ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
         END;
         ''')
+        # Previously installed question triggers do not include business IDs.
+        self.db.executescript('''
+        CREATE TRIGGER IF NOT EXISTS report_revision_business_insert AFTER INSERT ON records
+        WHEN NEW.kind IN ('business_question','hypothesis_proposal') BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_business_update AFTER UPDATE ON records
+        WHEN NEW.kind IN ('business_question','hypothesis_proposal') AND NEW.body<>OLD.body BEGIN
+          INSERT INTO report_revisions VALUES(NEW.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS report_revision_business_delete AFTER DELETE ON records
+        WHEN OLD.kind IN ('business_question','hypothesis_proposal') BEGIN
+          INSERT INTO report_revisions VALUES(OLD.case_id,1)
+          ON CONFLICT(case_id) DO UPDATE SET revision=revision+1;
+        END;
+        ''')
         self.db.executescript('''
         CREATE TRIGGER IF NOT EXISTS report_revision_objection_insert AFTER INSERT ON records
         WHEN NEW.kind IN ('objection','objection_decision') BEGIN

@@ -64,23 +64,42 @@ def audit(rows,oracle=None):
         usage.update({k:v for k,v in u.items() if isinstance(v,(int,float)) and not isinstance(v,bool)})
     findings=[r.get('finding',{}) for r in kinds['dossier'] if current(r) and r.get('status')=='reviewed']
     cited={i for f in findings for i in f.get('observation_ids',[])}
-    semantics={'claim_precision':None,'critical_recall':None,
+    semantics={'claim_precision':None,'critical_recall':None,'critical_citation_coverage':None,
         'scope':'Analyst-curated recoverable critical items and correctness labels required. Counts do not measure semantic understanding.'}
     if oracle:
         judgments=[x for x in oracle.get('accepted_claim_annotations',[]) if isinstance(x.get('correct'),bool)]
         if judgments:semantics['claim_precision']=sum(x['correct'] for x in judgments)/len(judgments)
         recoverable=[x for x in oracle.get('critical_items',[]) if x.get('recoverable') is True]
         if recoverable:
-            semantics['critical_recall']=sum(bool(set(x['observation_ids'])&cited) for x in recoverable)/len(recoverable)
+            semantics['critical_citation_coverage']=sum(bool(set(x.get('observation_ids',[]))&cited) for x in recoverable)/len(recoverable)
+            # The oracle, not citation intersection, must assess interpretation.
+            if all(isinstance(x.get('correctly_interpreted'),bool) for x in recoverable):
+                semantics['critical_recall']=sum(x['correctly_interpreted'] for x in recoverable)/len(recoverable)
         semantics.update(correctness_annotation_count=len(judgments),recoverable_critical_count=len(recoverable),
-            critical_recall_scope='Citation coverage of annotated critical items, not successful interpretation.')
+            critical_recall_scope='Oracle-labelled correct interpretation of recoverable critical items; null without complete labels.',
+            critical_citation_coverage_scope='Source ID intersection only, not successful interpretation.')
     questions=[q for q in kinds['case_question'] if current(q)]
     intents=[i for i in kinds['test_intent'] if current(i.get('scope',{}))]
-    return {'schema_version':'question-audit-1','scope':'Current case/generation; original database read-only.',
+    returned=[i for i in intents if i.get('status') in ('complete','partial') and i.get('assessment_status')!='assessed']
+    physical={j['id'] for j in jobs}
+    linked={i['result_scope']['job_id'] for i in returned if (i.get('result_scope') or {}).get('job_id') in physical}
+    backlog=[{'intent':label('test',i['id']),'question':label('question',i.get('business_question_id') or i.get('question_id')),
+        'physical_result':label('job',(i.get('result_scope') or {}).get('job_id')),
+        'status':i['status'],'purpose_present':bool((i.get('admission') or {}).get('design')),
+        'importance':i.get('importance','unprovided'),
+        'result_complete':i.get('result_complete'),
+        'logical_reuses':sum(u.get('test_intent_id')==i['id'] for u in kinds['test_result_use'])} for i in returned]
+    return {'schema_version':'question-audit-2','scope':'Current case/generation; original database read-only.',
         'counts':{k:len(v) for k,v in kinds.items() if k in ('observation','dossier','receipt','review_input','synthesis_input')},
         'question_states':dict(Counter(q.get('status','unknown') for q in questions)),
         'test_states':dict(Counter(i.get('status','unknown') for i in intents)),
         'test_assessments':dict(Counter(i.get('assessment_status','unassessed') for i in intents)),
+        'returned_unassessed':{'logical_intents':len(returned),'linked_distinct_physical_results':len(linked),
+            'unresolved_physical_links':sum((i.get('result_scope') or {}).get('job_id') not in physical for i in returned),
+            'importance_assessed':sum(i.get('importance') is not None for i in returned),
+            'scope':'Returned logical tests, not independent evidence or critical leads. Missing importance remains unknown.',
+            'items':backlog},
+        'input_budget_unit':'characters of serialized input; not provider tokens',
         'physical_jobs':len(jobs),'logical_result_uses':len(kinds['test_result_use']),
         'same_effective_request_extra_executions':sum(len(g)-1 for g in groups.values()),
         'same_effective_request_limit':'Includes legitimate transient retries. New ranges/objects stay distinct; not automatically waste.',

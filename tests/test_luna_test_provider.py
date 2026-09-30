@@ -6,10 +6,11 @@ from scripts import luna_test_provider as luna
 
 
 class FakeProcess:
-    def __init__(self, output, returncode=0, error=None):
+    def __init__(self, output, returncode=0, error=None, diagnostic=b''):
         self.output = output
         self.returncode = returncode
         self.error = error
+        self.diagnostic = diagnostic
 
     def communicate(self, input=None, timeout=None):
         if self.error:
@@ -17,18 +18,20 @@ class FakeProcess:
             raise error
         # stdout is assigned by the factory below.
         self.stdout.write(self.output)
+        self.stderr.write(self.diagnostic)
         return b"", b""
 
     def kill(self):
         self.returncode = -9
 
 
-def fake_popen_factory(output, returncode=0, error=None, seen=None):
+def fake_popen_factory(output, returncode=0, error=None, seen=None, diagnostic=b''):
     def factory(args, **kwargs):
         if seen is not None:
             seen.append((args, kwargs))
-        proc = FakeProcess(output, returncode, error)
+        proc = FakeProcess(output, returncode, error, diagnostic)
         proc.stdout = kwargs["stdout"]
+        proc.stderr = kwargs['stderr']
         return proc
 
     return factory
@@ -79,8 +82,57 @@ def test_timeout_is_killed_and_rejected(tmp_path, monkeypatch):
     from workbench.provider import ModelServiceError
     monkeypatch.setattr(luna, "_cli_version", lambda: "codex test")
     monkeypatch.setattr(luna.subprocess, "Popen", fake_popen_factory(b"", error=__import__("subprocess").TimeoutExpired(["codex"], 180)))
-    with pytest.raises(ModelServiceError, match="timed out"):
+    with pytest.raises(ModelServiceError, match="timed out") as caught:
         luna.infer([], {}, tmp_path)
+    assert caught.value.metadata['request_attempted'] is None
+    assert caught.value.metadata['delivery_state']=='unknown'
+    assert caught.value.metadata['process_started'] is True
+
+
+@pytest.mark.parametrize('stderr',[False,True])
+def test_discovery_failure_is_pre_delivery_service_error(tmp_path,monkeypatch,stderr):
+    from workbench.provider import ModelServiceError
+    monkeypatch.setattr(luna,'_cli_version',lambda:'codex fixture')
+    diagnostic=b'workspace routing discovery failed' if stderr else b''
+    output=b'{}\n' if stderr else b'{"type":"turn.failed","error":{"message":"workspace routing discovery failed"}}\n'
+    monkeypatch.setattr(luna.subprocess,'Popen',fake_popen_factory(output,returncode=1,diagnostic=diagnostic))
+    with pytest.raises(ModelServiceError) as caught:luna.infer([],{},tmp_path)
+    m=caught.value.metadata
+    assert m['phase']=='discovery' and m['request_attempted'] is False
+    assert m['delivery_state']=='not_sent' and m['process_started'] is True
+    assert m['retryable'] is True and m['exit_code']==1
+    assert 'stderr' not in m and len(m['stderr_sha256'])==64
+
+
+@pytest.mark.parametrize('status,category,retryable',[(401,'model_authentication',False),
+    (400,'model_request_configuration',False),(503,'model_service_unavailable',True)])
+def test_structured_cli_status_has_typed_service_classification(tmp_path,monkeypatch,status,category,retryable):
+    from workbench.provider import ModelServiceError
+    output=json.dumps({'type':'turn.failed','error':{'status_code':status,'message':'private diagnostic'}}).encode()
+    monkeypatch.setattr(luna,'_cli_version',lambda:'codex fixture')
+    monkeypatch.setattr(luna.subprocess,'Popen',fake_popen_factory(output,returncode=1))
+    with pytest.raises(ModelServiceError) as caught:luna.infer([],{},tmp_path)
+    assert caught.value.category==category and caught.value.metadata['retryable'] is retryable
+    assert caught.value.metadata['delivery_state']=='response_received'
+    assert 'private diagnostic' not in str(caught.value)
+
+
+def test_agent_prose_cannot_turn_unknown_exit_into_service_outage(tmp_path,monkeypatch):
+    from workbench.provider import ModelServiceError
+    output=b'{"type":"agent_message","text":"workspace routing discovery failed"}\n'
+    monkeypatch.setattr(luna,'_cli_version',lambda:'codex fixture')
+    monkeypatch.setattr(luna.subprocess,'Popen',fake_popen_factory(output,returncode=1))
+    with pytest.raises(luna.LunaProviderError) as caught:luna.infer([],{},tmp_path)
+    assert not isinstance(caught.value,ModelServiceError)
+
+
+def test_bad_transport_schema_never_starts_cli_or_consumes_content_retry(tmp_path,monkeypatch):
+    from workbench.provider import ModelServiceError
+    monkeypatch.setattr(luna,'_cli_version',lambda:pytest.fail('not reached'))
+    with pytest.raises(ModelServiceError) as caught:luna.infer([],{'oneOf':[{},{}]},tmp_path)
+    assert caught.value.metadata['phase']=='preparation'
+    assert caught.value.metadata['request_attempted'] is False
+    assert caught.value.metadata['retryable'] is False
 
 
 def test_strict_transport_schema_preserves_nullability_and_validation_bounds():

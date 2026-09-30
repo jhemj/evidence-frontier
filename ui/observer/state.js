@@ -8,6 +8,8 @@
         || !view.objects || !Array.isArray(view.narrative) || !Array.isArray(view.timeline)) throw Error('화면 계약 불일치');
     if(e.data_mode==='live'&&!e.source_binding)throw Error('실시간 원장 결속 미제공');
     const refOK = r => view.objects[r.key]?.version === r.version;
+    const incidentRef=view.summary?.intrusion?.leading_ref;
+    if(incidentRef&&(!refOK(incidentRef)||view.objects[incidentRef.key]?.type!=='incident'))throw Error('침해 판단 참조 불일치');
     for (const [key,o] of Object.entries(view.objects)) {
       if (o.key !== key || !o.version || !Array.isArray(o.refs) || !o.refs.every(refOK)) throw Error('객체 참조 버전 불일치');
     }

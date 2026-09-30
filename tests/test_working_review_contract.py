@@ -52,7 +52,10 @@ def test_json_compatibility_is_explicit_and_schema_rejection_never_downgrades():
         calls.append(json.loads(request.content))
         return httpx.Response(400,json={'error':'schema not supported'})
     p.client=httpx.Client(transport=httpx.MockTransport(reject))
-    with pytest.raises(ValueError,match='schema not supported'):p.generate('fixture',{})
+    from workbench.provider import ModelServiceError
+    with pytest.raises(ModelServiceError) as caught:p.generate('fixture',{})
+    assert caught.value.category=='model_request_configuration'
+    assert caught.value.metadata['http_status']==400 and caught.value.metadata['retryable'] is False
     assert len(calls)==1 and isinstance(calls[0]['format'],dict)
 
 

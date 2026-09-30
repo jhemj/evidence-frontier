@@ -72,6 +72,9 @@ def errors(output, dossier_ids, observation_ids, dossier_allowed=None, observati
     for check in output.get('next_checks',[]):
         if check['hypothesis_id'] not in wanted:
             issues.append({'code':'unknown_check_dossier','id':check['hypothesis_id']})
+    for proposal in output.get('explanation_proposals',[]):
+        if not proposal.get('trigger_observation_ids') or set(proposal['trigger_observation_ids'])-allowed:
+            issues.append({'code':'explanation_trigger_scope'})
     return issues
 
 
